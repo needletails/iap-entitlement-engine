@@ -20,8 +20,18 @@ public struct PendingRenewalInfo: Codable, Sendable {
     public var offerCodeRefName: String?
     public var priceConsentStatus: String?
     public var productId: String?
-
-    public init(autoRenewProductId: String, originalTransactionId: String, autoRenewStatus: String, expirationIntent: String? = nil, gracePeriodExpiresDate: String? = nil, gracePeriodExpiresDateMs: String? = nil, gracePeriodExpiresDatePst: String? = nil, isInBillingRetryPeriod: String? = nil, offerCodeRefName: String? = nil, priceConsentStatus: String? = nil, productId: String? = nil) {
+    
+    public init(autoRenewProductId: String = "",
+                originalTransactionId: String = "",
+                autoRenewStatus: String = "",
+                expirationIntent: String? = nil,
+                gracePeriodExpiresDate: String? = nil,
+                gracePeriodExpiresDateMs: String? = nil,
+                gracePeriodExpiresDatePst: String? = nil,
+                isInBillingRetryPeriod: String? = nil,
+                offerCodeRefName: String? = nil,
+                priceConsentStatus: String? = nil,
+                productId: String? = nil) {
         self.autoRenewProductId = autoRenewProductId
         self.originalTransactionId = originalTransactionId
         self.autoRenewStatus = autoRenewStatus
@@ -34,7 +44,7 @@ public struct PendingRenewalInfo: Codable, Sendable {
         self.priceConsentStatus = priceConsentStatus
         self.productId = productId
     }
-
+    
     private enum CodingKeys: String, CodingKey {
         case autoRenewProductId = "auto_renew_product_id"
         case originalTransactionId = "original_transaction_id"

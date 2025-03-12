@@ -40,7 +40,7 @@ public actor EntitlementEngine {
         self.apnTopic = apnTopic
     }
     
-    private func isCancelled(latestReceiptInfo: LatestReceiptInfo) -> Bool {
+    func isCancelled(latestReceiptInfo: LatestReceiptInfo) async -> Bool {
         var cancelled: Bool
         guard let cancellationDate = Int64(latestReceiptInfo.cancellationDateMs ?? "") else { return false }
         
@@ -147,8 +147,8 @@ public actor EntitlementEngine {
         return expired
     }
     
-    private func expirationLogic<T: Codable>(
-        apns: APNSClient<T, T>,
+    func expirationLogic(
+        apns: APNSClient<JSONDecoder, JSONEncoder>,
         pushType: PushType,
         topic: IAPTopic,
         payload: IAPPayload? = nil,
@@ -182,8 +182,8 @@ public actor EntitlementEngine {
         return .ok
     }
     
-    private func cancellationLogic<T: Codable>(
-        apns: APNSClient<T, T>,
+    func cancellationLogic(
+        apns: APNSClient<JSONDecoder, JSONEncoder>,
         pushType: PushType,
         topic: IAPTopic,
         payload: IAPPayload,
@@ -200,8 +200,8 @@ public actor EntitlementEngine {
         case alert
     }
     
-    private func doPush<T: Codable>(
-        apns: sending APNSClient<T, T>,
+    private func doPush(
+        apns: sending APNSClient<JSONDecoder, JSONEncoder>,
         pushType: PushType,
         topic: IAPTopic,
         payload: IAPPayload
@@ -228,8 +228,8 @@ public actor EntitlementEngine {
         }
     }
     
-    private func turnAutoRenewOn<T: Codable>(_
-                                             apns: APNSClient<T, T>,
+    private func turnAutoRenewOn(_
+                                             apns: APNSClient<JSONDecoder, JSONEncoder>,
                                              pushType: PushType,
                                              topic: IAPTopic,
                                              payload: IAPPayload
@@ -241,8 +241,8 @@ public actor EntitlementEngine {
             payload: payload)
     }
     
-    private func sendUpgradeThankYou<T: Codable>(
-        apns: APNSClient<T, T>,
+    private func sendUpgradeThankYou(
+        apns: APNSClient<JSONDecoder, JSONEncoder>,
         pushType: PushType,
         topic: IAPTopic,
         payload: IAPPayload
@@ -255,8 +255,8 @@ public actor EntitlementEngine {
     }
     
     
-    private func handleTrialSubscriptionStatus<T: Codable>(
-        apns: APNSClient<T, T>,
+    private func handleTrialSubscriptionStatus(
+        apns: APNSClient<JSONDecoder, JSONEncoder>,
         pushType: PushType,
         topic: IAPTopic,
         payload: IAPPayload,
@@ -315,8 +315,8 @@ public actor EntitlementEngine {
         return .ok
     }
     
-    private func handleUsersSubscriptionStatus<T: Codable>(
-        apns: sending APNSClient<T, T>,
+    private func handleUsersSubscriptionStatus(
+        apns: sending APNSClient<JSONDecoder, JSONEncoder>,
         pushType: PushType,
         topic: IAPTopic,
         payload: IAPPayload,
@@ -376,8 +376,8 @@ public actor EntitlementEngine {
     }
     
     //Here is our entitlement engine that sends our user notification along with their user status
-    public func processReceipt<T: Codable>(
-        apns: sending APNSClient<T, T>,
+    public func processReceipt(
+        apns: sending APNSClient<JSONDecoder, JSONEncoder>,
         order: Order,
         orderId: String,
         latestReceiptInfo: LatestReceiptInfo,
@@ -434,7 +434,7 @@ public actor EntitlementEngine {
                         latestReceiptInfo: latestReceiptInfo,
                         pendingRenewalInfo: pendingRenewalInfo)
                     
-                } else if isCancelled(latestReceiptInfo: latestReceiptInfo) {
+                } else if await isCancelled(latestReceiptInfo: latestReceiptInfo) {
                     
                     var payload: IAPPayload
                     switch latestReceiptInfo.productId {

@@ -7,7 +7,7 @@
 
 import Foundation
 
-public struct LatestReceiptInfo: Codable {
+public struct LatestReceiptInfo: Codable, Sendable {
     public var quantity: String
     public var productId: String
     public var transactionId: String
@@ -33,7 +33,30 @@ public struct LatestReceiptInfo: Codable {
     public var offerCodeRefName: String?
     public var promotionalOfferId: String?
     
-    public init(quantity: String, productId: String, transactionId: String, originalTransactionId: String, purchaseDate: String, purchaseDateMs: String, purchaseDatePst: String, originalPurchaseDate: String, originalPurchaseDateMs: String, originalPurchaseDatePst: String, expiresDate: String, expiresDateMs: String, expiresDatePst: String, webOrderLineItemId: String, isTrialPeriod: String, isInIntroOfferPeriod: String, subscriptionGroupIdentifier: String, cancellationDate: String? = nil, cancellationDateMs: String? = nil, cancellationDatePst: String? = nil, cancellationReason: String? = nil, isUpgraded: String? = nil, offerCodeRefName: String? = nil, promotionalOfferId: String? = nil) {
+    public init(quantity: String = "",
+                productId: String = "",
+                transactionId: String = "",
+                originalTransactionId: String = "",
+                purchaseDate: String = "",
+                purchaseDateMs: String = "",
+                purchaseDatePst: String = "",
+                originalPurchaseDate: String = "",
+                originalPurchaseDateMs: String = "",
+                originalPurchaseDatePst: String = "",
+                expiresDate: String = "",
+                expiresDateMs: String = "",
+                expiresDatePst: String = "",
+                webOrderLineItemId: String = "",
+                isTrialPeriod: String = "",
+                isInIntroOfferPeriod: String = "",
+                subscriptionGroupIdentifier: String = "",
+                cancellationDate: String? = nil,
+                cancellationDateMs: String? = nil,
+                cancellationDatePst: String? = nil,
+                cancellationReason: String? = nil,
+                isUpgraded: String? = nil,
+                offerCodeRefName: String? = nil,
+                promotionalOfferId: String? = nil) {
         self.quantity = quantity
         self.productId = productId
         self.transactionId = transactionId
