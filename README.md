@@ -1,8 +1,8 @@
+<img src="iap_engine.svg" alt="IAP Entitlement Engine" width="200" />
+
 # In-App Purchase Entitlement Swift Package
 
 ![Swift Package](https://img.shields.io/badge/Swift-6.0-orange.svg)
-
-![In App Purchases Entitlement Engine](IAPLogo.png)
 
 ## Overview
 
