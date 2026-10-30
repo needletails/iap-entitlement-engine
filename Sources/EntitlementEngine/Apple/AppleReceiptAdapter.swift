@@ -47,8 +47,17 @@ enum AppleReceiptAdapter {
         }
 
         let expiresAt = try date(receipt.expiresDateMs, field: "expires_date_ms")
-        if expiresAt <= now, let graceMs = renewal.gracePeriodExpiresDateMs, !graceMs.isEmpty {
-            return make(.gracePeriod, expiresAt: try date(graceMs, field: "grace_period_expires_date_ms"))
+        if expiresAt <= now {
+            let grace = try renewal.gracePeriodExpiresDateMs
+                .flatMap { $0.isEmpty ? nil : $0 }
+                .map { try date($0, field: "grace_period_expires_date_ms") }
+            // Apple also retries during a grace period, and access continues until that ends.
+            if renewal.isInBillingRetryPeriod == "1", (grace ?? .distantPast) <= now {
+                return make(.suspended(.billing), expiresAt: expiresAt)
+            }
+            if let grace {
+                return make(.gracePeriod, expiresAt: grace)
+            }
         }
         return make(.active, expiresAt: expiresAt)
     }

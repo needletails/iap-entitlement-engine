@@ -3,10 +3,9 @@
 //  iap-entitlement-engine
 //
 
-import AsyncHTTPClient
 import Foundation
-import NIOCore
-import NIOHTTP1
+import HTTPConnectionKit
+import HTTPTypes
 
 public enum FCMError: Error, Sendable, Equatable {
     /// The registration token is no longer valid. Stop sending to it.
@@ -35,29 +34,37 @@ public protocol FCMTransport: Sendable {
     func post(url: String, headers: [String: String], body: Data) async throws -> FCMTransportResponse
 }
 
-/// The default transport, backed by AsyncHTTPClient.
-public struct AsyncHTTPClientFCMTransport: FCMTransport {
-    private static let maxResponseBytes = 1 << 20
+/// The default transport, backed by HTTPConnectionKit.
+public struct HTTPConnectionFCMTransport: FCMTransport {
+    /// FCM never redirects, so a redirect is reported as a failed send instead of being followed.
+    private static let shared = HTTPConnection(configuration: .init(
+        protocols: .prefer(.http2, fallback: [.http1_1]),
+        redirects: .disabled,
+        maximumBufferedBodySize: 1 << 20))
 
-    private let client: HTTPClient
-    private let timeout: TimeAmount
+    private let client: HTTPConnection
+    private let timeout: Duration
 
-    public init(client: HTTPClient = .shared, timeout: TimeAmount = .seconds(30)) {
-        self.client = client
+    public init(client: HTTPConnection? = nil, timeout: Duration = .seconds(30)) {
+        self.client = client ?? Self.shared
         self.timeout = timeout
     }
 
     public func post(url: String, headers: [String: String], body: Data) async throws -> FCMTransportResponse {
-        var request = HTTPClientRequest(url: url)
-        request.method = .POST
+        guard let target = URL(string: url) else { throw HTTPConnectionError.invalidRequest }
+        var fields = HTTPFields()
         for (name, value) in headers {
-            request.headers.add(name: name, value: value)
+            guard let field = HTTPField.Name(name) else { throw HTTPConnectionError.invalidRequest }
+            fields[field] = value
         }
-        request.body = .bytes(ByteBuffer(bytes: body))
 
-        let response = try await client.execute(request, timeout: timeout)
-        let collected = try await response.body.collect(upTo: Self.maxResponseBytes)
-        return FCMTransportResponse(status: Int(response.status.code), body: Data(collected.readableBytesView))
+        let response = try await client.request(
+            method: .post,
+            url: target,
+            headers: fields,
+            body: body,
+            options: .init(timeout: timeout))
+        return FCMTransportResponse(status: response.head.status.code, body: response.body ?? Data())
     }
 }
 
@@ -73,7 +80,7 @@ public struct FCMEntitlementNotifier: EntitlementNotifier {
         projectID: String,
         registrationToken: String,
         accessTokenProvider: any FCMAccessTokenProvider,
-        transport: any FCMTransport = AsyncHTTPClientFCMTransport(),
+        transport: any FCMTransport = HTTPConnectionFCMTransport(),
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.projectID = projectID

@@ -9,7 +9,7 @@ public enum EntitlementError: Error, Sendable, Equatable {
     case invalidOrderID
     /// A required date is missing or malformed. Access is never granted on a date that cannot be read.
     case invalidDate(field: String)
-    /// The Apple receipt and renewal info belong to different subscriptions.
+    /// The Apple receipt or transaction and its renewal info belong to different subscriptions.
     case transactionMismatch
     /// Google returned a subscription state this version of the SDK does not know about.
     case unsupportedState(String)

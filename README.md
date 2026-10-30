@@ -26,7 +26,7 @@ The engine trusts its inputs. It does not fetch or verify purchases, so verify t
 ## Installation
 
 ```swift
-.package(url: "https://github.com/needle-tail/iap-entitlement-engine.git", from: "1.0.0")
+.package(url: "https://github.com/needletails/iap-entitlement-engine.git", from: "1.0.0")
 ```
 
 ## Usage
@@ -34,6 +34,83 @@ The engine trusts its inputs. It does not fetch or verify purchases, so verify t
 Implement `EntitlementStoreDelegate` to save orders, then create an engine. Engines are cheap and hold no per-call state, so one instance can process many subscriptions at once.
 
 ### App Store
+
+Use signed data from the App Store Server API or App Store Server Notifications V2 for new work. The `verifyReceipt` path below keeps working for apps that have not migrated.
+
+#### Signed data
+
+Verify the JWS strings first, then pass the decoded values to the engine. The engine does not check signatures, and it does not depend on Apple's [`app-store-server-library-swift`](https://github.com/apple/app-store-server-library-swift).
+
+Apple's library caps `swift-crypto` below 4.0 and this package needs 5.0.3 or later, so the two cannot resolve in one package graph until Apple raises that cap. Until then, use one of these:
+
+- **A fork of Apple's library** with the `swift-crypto` cap raised to `"6.0.0"`. Version 6.0.0 builds and works with that one change.
+- **A separate service** that verifies with Apple's library and passes the decoded JSON on.
+- **Another JWS library**, such as `jwt-kit` with `swift-certificates`. You then have to validate the certificate chain against Apple's root yourself.
+
+With Apple's library, the flow looks like this:
+
+```swift
+import AppStoreServerLibrary
+import IAPEntitlementEngine
+
+let verifier = try SignedDataVerifier(
+    rootCertificates: appleRootCertificates,
+    bundleId: "com.example.app",
+    appAppleId: 1234567890,
+    environment: .production,
+    enableOnlineChecks: true
+)
+
+guard case .valid(let transaction) = await verifier.verifyAndDecodeTransaction(signedTransaction: signedTransactionInfo),
+      case .valid(let renewal) = await verifier.verifyAndDecodeRenewalInfo(signedRenewalInfo: signedRenewalInfo)
+else {
+    return // Reject the data. Nothing has been changed.
+}
+
+let engine = EntitlementEngine(
+    storeDelegate: store,
+    weeklyProductID: "com.example.weekly",
+    monthlyProductID: "com.example.monthly",
+    yearlyProductID: "com.example.yearly"
+)
+
+try await engine.processAppStoreTransaction(
+    notifier: APNSEntitlementNotifier(client: apnsClient, topic: "com.example.app", deviceToken: deviceToken),
+    order: order,
+    orderId: order.id.uuidString,
+    transaction: AppStoreTransaction(
+        productId: transaction.productId,
+        originalTransactionId: transaction.originalTransactionId,
+        expiresDate: transaction.expiresDate,
+        isUpgraded: transaction.isUpgraded,
+        revocationDate: transaction.revocationDate,
+        revocationReason: transaction.rawRevocationReason,
+        offerType: transaction.rawOfferType,
+        offerDiscountType: transaction.rawOfferDiscountType
+    ),
+    renewalInfo: AppStoreRenewalInfo(
+        originalTransactionId: renewal.originalTransactionId,
+        autoRenewStatus: renewal.rawAutoRenewStatus,
+        gracePeriodExpiresDate: renewal.gracePeriodExpiresDate,
+        isInBillingRetryPeriod: renewal.isInBillingRetryPeriod
+    )
+)
+```
+
+If you verify with another JWS library, decode the verified payload JSON straight into `AppStoreTransaction` and `AppStoreRenewalInfo`. They read Apple's millisecond dates whatever date strategy the decoder uses.
+
+Verification is left to your server because it needs your root certificates, bundle ID, app ID and environment.
+
+Your server has to handle these parts itself:
+
+- **Notification order:** Apple can deliver notifications late or out of order, and the engine applies whatever it is given. Fetch the current state with Get All Subscription Statuses when a notification arrives, or skip data with an older `signedDate` than you have already processed.
+- **Verification failures:** retry `RETRYABLE_VERIFICATION_FAILURE`, which means Apple's revocation check could not be reached, and return a non-2xx response so Apple resends the notification. Reject everything else.
+- **Renewal info:** pass the `signedRenewalInfo` that came with the transaction. It carries the auto-renew status, grace period and billing retry state.
+- **No subscription:** if Apple returns no transactions, pass `AppStoreTransaction()`, which reports the customer as not subscribed.
+
+Any revocation date ends access, including prorated refunds and Family Sharing removals.
+
+#### Receipts
 
 ```swift
 let engine = EntitlementEngine(
@@ -101,6 +178,7 @@ Your server has to handle these parts itself:
 | Trial or intro offer | Yes | When it starts |
 | Auto-renew off, under 24 hours left | Yes | Expiry warning |
 | Grace period | Yes | Payment issue |
+| Apple billing retry, no grace period left | No | Payment issue |
 | Google account hold | No | Payment issue |
 | Google pause | No | None |
 | Expired | No | None |
@@ -113,10 +191,14 @@ The order is saved before the push is sent. If saving fails, no push is sent. If
 
 Grace period and expiry warnings repeat each time you process that state. They use a collapse ID, so a new copy replaces the old one on the device, but you should still process on store events rather than on a short timer.
 
-Malformed or unknown store data throws an `EntitlementError`, and nothing is saved or sent. FCM throws `FCMError.unregistered` when a token goes stale, so you can stop using it.
+Malformed or unknown store data throws an `EntitlementError`, and nothing is saved or sent. Decoding `AppStoreTransaction` or `AppStoreRenewalInfo` throws a `DecodingError` on malformed JSON, before the engine is involved. FCM throws `FCMError.unregistered` when a token goes stale, so you can stop using it.
 
 ## Upgrading
 
+- `AsyncHTTPClientFCMTransport` is replaced by `HTTPConnectionFCMTransport`, which takes an `HTTPConnection` and a `Duration` timeout. It does not follow redirects by default.
+- This package no longer uses AsyncHTTPClient and needs `swift-crypto` 5.0.3 or later. `processReceipt` still accepts any `APNSClientProtocol`, but APNSwift's own `APNSClient` from the `APNS` product brings AsyncHTTPClient back into your build.
+- To move off `verifyReceipt`, replace `processReceipt` with `processAppStoreTransaction`. Both apply the same rules. The new method takes a notifier, so the engine no longer needs `apnTopic` and `deviceToken`.
+- A lapsed Apple subscription in billing retry now gets the payment issue push when access ends, on both Apple paths. It used to end silently.
 - `processReceipt` now throws on failures that it used to log and report as `.ok`.
 - `processReceipt` accepts any `APNSClientProtocol`, and requires `apnTopic` and `deviceToken`.
 - The default notification copy changed. Use `EntitlementMessages` to set your own.

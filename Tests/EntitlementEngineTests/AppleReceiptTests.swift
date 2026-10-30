@@ -1,4 +1,3 @@
-import APNS
 import Foundation
 import Testing
 @testable import IAPEntitlementEngine
@@ -84,6 +83,50 @@ struct AppleReceiptAdapterTests {
 
         let current = try map(LatestReceiptInfo(productId: "monthly", expiresDateMs: future), renewal)
         #expect(current.lifecycle == .active)
+    }
+
+    @Test func billingRetryAfterExpiryIsSuspended() throws {
+        let snapshot = try map(
+            LatestReceiptInfo(productId: "monthly", expiresDateMs: past),
+            PendingRenewalInfo(isInBillingRetryPeriod: "1"))
+        #expect(snapshot.lifecycle == .suspended(.billing))
+    }
+
+    /// `"0"` means Apple stopped retrying, which is a plain expiry.
+    @Test func billingRetryFlagZeroIsNotARetry() throws {
+        let snapshot = try map(
+            LatestReceiptInfo(productId: "monthly", expiresDateMs: past),
+            PendingRenewalInfo(isInBillingRetryPeriod: "0"))
+        #expect(snapshot.lifecycle == .active)
+    }
+
+    @Test func billingRetryBeforeExpiryChangesNothing() throws {
+        let snapshot = try map(
+            LatestReceiptInfo(productId: "monthly", expiresDateMs: future),
+            PendingRenewalInfo(isInBillingRetryPeriod: "1"))
+        #expect(snapshot.lifecycle == .active)
+    }
+
+    /// Apple retries during a grace period too, and the customer keeps access until it ends.
+    @Test func gracePeriodWinsOverBillingRetryUntilItEnds() throws {
+        let running = try map(
+            LatestReceiptInfo(productId: "monthly", expiresDateMs: past),
+            PendingRenewalInfo(
+                gracePeriodExpiresDateMs: milliseconds(now.addingTimeInterval(60)),
+                isInBillingRetryPeriod: "1"))
+        #expect(running.lifecycle == .gracePeriod)
+
+        let ended = try map(
+            LatestReceiptInfo(productId: "monthly", expiresDateMs: past),
+            PendingRenewalInfo(gracePeriodExpiresDateMs: milliseconds(now), isInBillingRetryPeriod: "1"))
+        #expect(ended.lifecycle == .suspended(.billing))
+    }
+
+    @Test func revocationWinsOverBillingRetry() throws {
+        let snapshot = try map(
+            LatestReceiptInfo(productId: "monthly", expiresDateMs: past, cancellationDateMs: past),
+            PendingRenewalInfo(isInBillingRetryPeriod: "1"))
+        #expect(snapshot.lifecycle == .revoked(.other))
     }
 
     @Test func malformedExpiryThrowsInsteadOfFailingOpen() {
@@ -208,6 +251,22 @@ struct AppleEngineTests {
         #expect(alert["launch-image"] == nil)
     }
 
+    @Test func billingRetryEndsAccessAndAsksForPaymentOnce() async throws {
+        let lapsed = LatestReceiptInfo(productId: "monthly", expiresDateMs: milliseconds(now.addingTimeInterval(-60)))
+        let retrying = PendingRenewalInfo(autoRenewStatus: "1", isInBillingRetryPeriod: "1")
+        _ = try await engine().processReceipt(
+            apns: client, order: order(subscribed: true), orderId: orderID.uuidString,
+            latestReceiptInfo: lapsed, pendingRenewalInfo: retrying)
+        #expect(store.updates.first?.order.isSubscribed == false)
+        #expect(client.requests.map(\.collapseID) == ["billing-issue"])
+
+        let saved = try #require(store.updates.first?.order)
+        _ = try await engine().processReceipt(
+            apns: client, order: saved, orderId: orderID.uuidString,
+            latestReceiptInfo: lapsed, pendingRenewalInfo: retrying)
+        #expect(client.requests.count == 1)
+    }
+
     @Test func engineWithoutAPNsConfigurationThrowsBeforeSavingAnything() async {
         let googleOnly = EntitlementEngine(
             storeDelegate: store, weeklyProductID: "weekly", monthlyProductID: "monthly",
@@ -286,14 +345,4 @@ struct AppleEngineTests {
             pendingRenewalInfo: PendingRenewalInfo())
         #expect(store.updates.first?.order.isSubscribed == false)
     }
-}
-
-/// Compile-time check that the real APNs client still satisfies the engine's API.
-private func acceptsRealClient(
-    engine: EntitlementEngine,
-    client: APNSClient<JSONDecoder, JSONEncoder>,
-    order: Order
-) async throws {
-    _ = try await engine.processReceipt(
-        apns: client, order: order, orderId: "", latestReceiptInfo: .init(), pendingRenewalInfo: .init())
 }

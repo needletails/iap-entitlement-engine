@@ -5,7 +5,8 @@
 
 import Foundation
 
-/// A store-neutral view of one subscription. Apple receipts and Google Play purchases are both reduced to this.
+/// A store-neutral view of one subscription. Apple receipts, App Store signed data and Google Play
+/// purchases are all reduced to this.
 public struct SubscriptionSnapshot: Sendable, Equatable {
 
     public enum Lifecycle: Sendable, Equatable {

@@ -86,6 +86,30 @@ public actor EntitlementEngine {
             now: date)
     }
 
+    /// Applies verified App Store Server API or Notifications V2 data, then notifies the device
+    /// through `notifier`.
+    ///
+    /// The order is saved before the push goes out, so a push failure throws but the entitlement
+    /// stays correct.
+    ///
+    /// - Parameters:
+    ///   - transaction: The decoded `signedTransactionInfo`. Verify its signature first.
+    ///   - renewalInfo: The decoded `signedRenewalInfo`. Verify its signature first.
+    public func processAppStoreTransaction(
+        notifier: some EntitlementNotifier,
+        order: Order,
+        orderId: String,
+        transaction: AppStoreTransaction,
+        renewalInfo: AppStoreRenewalInfo
+    ) async throws -> HTTPResponse.Status {
+        let date = now()
+        let snapshot = try AppStoreSignedDataAdapter.snapshot(
+            transaction: transaction,
+            renewalInfo: renewalInfo,
+            now: date)
+        return try await apply(snapshot, order: order, orderId: orderId, notifier: notifier, now: date)
+    }
+
     /// Applies a verified Google Play purchase, then notifies the device through `notifier`.
     ///
     /// The order is saved before the push goes out, so a push failure throws but the entitlement
