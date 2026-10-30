@@ -16,18 +16,3 @@ extension Date {
         self = Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1000)
     }
 }
-
-extension DateFormatter {
-    func getFormattedDate(currentFormat: String, newFormat: String, date: Date) -> String {
-        let dateFormatter = self
-        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
-        dateFormatter.timeZone = TimeZone.current
-        dateFormatter.locale = Locale.current
-        
-        dateFormatter.dateFormat = currentFormat
-        let converToNewFormat = self
-        converToNewFormat.dateFormat = newFormat
-        
-        return converToNewFormat.string(from: date)
-    }
-}

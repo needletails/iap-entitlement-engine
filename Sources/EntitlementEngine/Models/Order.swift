@@ -7,7 +7,7 @@
 
 import Foundation
 
-public struct Order: Codable, Sendable {
+public struct Order: Codable, Sendable, Equatable {
     
     public let id: UUID
     public var productName: String?

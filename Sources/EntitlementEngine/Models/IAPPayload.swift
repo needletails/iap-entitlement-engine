@@ -7,7 +7,7 @@
 
 import Foundation
 
-public struct IAPPayload: Codable, Sendable {
+public struct IAPPayload: Codable, Sendable, Equatable {
     
     public let title: String
     public let subtitle: String
