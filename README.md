@@ -39,15 +39,17 @@ Use signed data from the App Store Server API or App Store Server Notifications 
 
 #### Signed data
 
-Verify the JWS strings first, then pass the decoded values to the engine. The engine does not check signatures, and it does not depend on Apple's [`app-store-server-library-swift`](https://github.com/apple/app-store-server-library-swift).
+Verify the JWS strings first, then pass the decoded values to the engine. The engine does not check signatures.
 
-Apple's library caps `swift-crypto` below 4.0 and this package needs 5.0.3 or later, so the two cannot resolve in one package graph until Apple raises that cap. Until then, use one of these:
+Apple's [`app-store-server-library-swift`](https://github.com/apple/app-store-server-library-swift) caps `swift-crypto` below 4.0, and this package needs 5.0.3 or later, so the two cannot resolve together. Until Apple raises that cap, add our [fork](https://github.com/needletails/app-store-server-library-swift) to your server. It changes only that version limit:
 
-- **A fork of Apple's library** with the `swift-crypto` cap raised to `"6.0.0"`. Version 6.0.0 builds and works with that one change.
-- **A separate service** that verifies with Apple's library and passes the decoded JSON on.
-- **Another JWS library**, such as `jwt-kit` with `swift-certificates`. You then have to validate the certificate chain against Apple's root yourself.
+```swift
+.package(url: "https://github.com/needletails/app-store-server-library-swift.git", branch: "main")
+```
 
-With Apple's library, the flow looks like this:
+Keep the product name `AppStoreServerLibrary`. A separate verifying service works too, or another JWS library, in which case you have to validate the certificate chain against Apple's root yourself.
+
+Verify in your server target:
 
 ```swift
 import AppStoreServerLibrary
