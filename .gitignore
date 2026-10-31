@@ -1,9 +1,47 @@
+# macOS
 .DS_Store
+
+# Swift Package Manager
 /.build
 /Packages
+/Package.resolved
+.swiftpm/config/registries.json
+.swiftpm/configuration/
+.swiftpm/security/
+.swiftpm/xcode/package.xcworkspace/
+
+# Xcode
 /*.xcodeproj
+*.xcworkspace
 xcuserdata/
 DerivedData/
-.swiftpm/config/registries.json
-.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Claude Code
+.claude/settings.local.json
+
+# Secrets
 .netrc
+.env
+.env.*
+*.env
+.envrc
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+*.provisionprofile
+secrets/
+*secret*
+credentials*
+*service-account*.json
+GoogleService-Info.plist
+google-services.json
