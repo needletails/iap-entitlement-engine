@@ -101,6 +101,19 @@ If you verify with another JWS library, decode the verified payload JSON straigh
 
 Verification is left to your server because it needs your root certificates, bundle ID, app ID and environment.
 
+Create `apnsClient` once and reuse it. It is built on HTTPConnectionKit, signs its own provider tokens, and prefers HTTP/3, and downgrades to HTTP/2 when QUIC fails:
+
+```swift
+let apnsClient = HTTPConnectionAPNSClient(
+    environment: .production,
+    privateKey: try P256.Signing.PrivateKey(pemRepresentation: authKeyPEM),
+    keyIdentifier: "ABC123DEFG",
+    teamIdentifier: "DEF123GHIJ"
+)
+```
+
+Use `.development` for device tokens from debug builds. An `APNSError` with status 410 means the token is no longer valid, so stop using it. Call `shutdown()` when your server stops.
+
 Your server has to handle these parts itself:
 
 - **Notification order:** Apple can deliver notifications late or out of order, and the engine applies whatever it is given. Fetch the current state with Get All Subscription Statuses when a notification arrives, or skip data with an older `signedDate` than you have already processed.
@@ -196,7 +209,7 @@ Malformed or unknown store data throws an `EntitlementError`, and nothing is sav
 ## Upgrading
 
 - `AsyncHTTPClientFCMTransport` is replaced by `HTTPConnectionFCMTransport`, which takes an `HTTPConnection` and a `Duration` timeout. It does not follow redirects by default.
-- This package no longer uses AsyncHTTPClient and needs `swift-crypto` 5.0.3 or later. `processReceipt` still accepts any `APNSClientProtocol`, but APNSwift's own `APNSClient` from the `APNS` product brings AsyncHTTPClient back into your build.
+- This package no longer uses AsyncHTTPClient and needs `swift-crypto` 5.0.3 or later. Use `HTTPConnectionAPNSClient` for APNs. `processReceipt` and `APNSEntitlementNotifier` still accept any `APNSClientProtocol`, but APNSwift's own `APNSClient` brings AsyncHTTPClient back into your build.
 - To move off `verifyReceipt`, replace `processReceipt` with `processAppStoreTransaction`. Both apply the same rules. The new method takes a notifier, so the engine no longer needs `apnTopic` and `deviceToken`.
 - A lapsed Apple subscription in billing retry now gets the payment issue push when access ends, on both Apple paths. It used to end silently.
 - `processReceipt` now throws on failures that it used to log and report as `.ok`.

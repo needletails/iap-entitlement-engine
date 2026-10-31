@@ -36,11 +36,13 @@ public protocol FCMTransport: Sendable {
 
 /// The default transport, backed by HTTPConnectionKit.
 public struct HTTPConnectionFCMTransport: FCMTransport {
-    /// FCM never redirects, so a redirect is reported as a failed send instead of being followed.
-    private static let shared = HTTPConnection(configuration: .init(
-        protocols: .prefer(.http2, fallback: [.http1_1]),
+    /// Tries HTTP/3 and downgrades when QUIC fails. FCM never redirects, so a redirect is reported as a failed send instead of being followed.
+    static let configuration = HTTPConnection.Configuration(
+        protocols: .default,
         redirects: .disabled,
-        maximumBufferedBodySize: 1 << 20))
+        maximumBufferedBodySize: 1 << 20)
+
+    private static let shared = HTTPConnection(configuration: configuration)
 
     private let client: HTTPConnection
     private let timeout: Duration

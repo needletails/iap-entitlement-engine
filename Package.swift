@@ -41,6 +41,7 @@ let package = Package(
             dependencies: [
                 "IAPEntitlementEngine",
                 .product(name: "APNSCore", package: "APNSwift"),
+                .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "HTTPConnectionKit", package: "http-connection-kit"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
