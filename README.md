@@ -41,7 +41,7 @@ Use signed data from the App Store Server API or App Store Server Notifications 
 
 Verify the JWS strings first, then pass the decoded values to the engine. The engine does not check signatures.
 
-Apple's [`app-store-server-library-swift`](https://github.com/apple/app-store-server-library-swift) caps `swift-crypto` below 4.0, and this package needs 5.0.3 or later, so the two cannot resolve together. Until Apple raises that cap, add our [fork](https://github.com/needletails/app-store-server-library-swift) to your server. It changes only that version limit:
+Apple's [`app-store-server-library-swift`](https://github.com/apple/app-store-server-library-swift) caps `swift-crypto` below 4.0, and this package needs 5.0.3 or later, so the two cannot resolve together. Until Apple raises that cap, add our [fork](https://github.com/needletails/app-store-server-library-swift) to your server. It raises that limit and sends its requests through HTTPConnectionKit instead of AsyncHTTPClient:
 
 ```swift
 .package(url: "https://github.com/needletails/app-store-server-library-swift.git", branch: "main")
