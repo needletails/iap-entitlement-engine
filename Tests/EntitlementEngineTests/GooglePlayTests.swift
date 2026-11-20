@@ -178,6 +178,40 @@ struct GooglePlayAdapterTests {
         #expect(snapshot.expiresAt == googleExpiry)
     }
 
+    /// A deferred plan change lists the new plan before it starts, with no expiry yet.
+    static let deferredReplacement = #"""
+    {"subscriptionState":"SUBSCRIPTION_STATE_ACTIVE","lineItems":[
+      {"productId":"yearly","expiryTime":"2027-01-15T08:00:00Z","autoRenewingPlan":{"autoRenewEnabled":false},
+       "deferredItemReplacement":{"productId":"monthly"}},
+      {"productId":"monthly","autoRenewingPlan":{"autoRenewEnabled":true}}]}
+    """#
+
+    @Test func deferredReplacementKeepsTheCurrentPlanUntilTheNewOneStarts() throws {
+        let deferred = try JSONDecoder().decode(
+            GooglePlaySubscriptionPurchase.self, from: Data(Self.deferredReplacement.utf8))
+        let snapshot = try map(deferred)
+        #expect(snapshot.lifecycle == .active)
+        #expect(snapshot.productID == "yearly")
+        #expect(snapshot.expiresAt == googleExpiry)
+    }
+
+    /// The subscription carries on under the new plan, so "turn on auto-renew" would be wrong.
+    @Test func deferredReplacementIsNotAboutToLapse() throws {
+        let deferred = try JSONDecoder().decode(
+            GooglePlaySubscriptionPurchase.self, from: Data(Self.deferredReplacement.utf8))
+        #expect(try map(deferred).autoRenewEnabled)
+    }
+
+    @Test func planThatHasNotStartedDoesNotHideTheOneThatHas() throws {
+        let json = #"""
+        {"subscriptionState":"SUBSCRIPTION_STATE_ACTIVE","lineItems":[
+          {"productId":"addon","expiryTime":"2027-01-15T08:00:00Z"},
+          {"productId":"monthly"}]}
+        """#
+        let mixed = try JSONDecoder().decode(GooglePlaySubscriptionPurchase.self, from: Data(json.utf8))
+        #expect(try map(mixed).productID == "addon")
+    }
+
     @Test func exposesAcknowledgementAndTestFlags() throws {
         let test = try purchase(state: "SUBSCRIPTION_STATE_ACTIVE", extra: #""testPurchase":{},"#)
         #expect(test.isTestPurchase)
@@ -225,6 +259,25 @@ struct GooglePlayEngineTests {
         _ = try await engine.processGooglePlayPurchase(
             notifier: notifier, order: Order(id: orderID, productName: "monthly", isSubscribed: true),
             orderId: orderID.uuidString, purchase: purchase(state: "SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED"))
+        #expect(store.updates.isEmpty)
+        #expect(notifier.sent.isEmpty)
+    }
+
+    @Test func deferredPlanChangeLeavesASubscriberOnTheirCurrentPlan() async throws {
+        let deferred = try JSONDecoder().decode(
+            GooglePlaySubscriptionPurchase.self, from: Data(GooglePlayAdapterTests.deferredReplacement.utf8))
+        _ = try await engine.processGooglePlayPurchase(
+            notifier: notifier, order: Order(id: orderID, productName: "yearly", isSubscribed: true),
+            orderId: orderID.uuidString, purchase: deferred)
+        #expect(store.updates.isEmpty)
+        #expect(notifier.sent.isEmpty)
+    }
+
+    @Test func anotherProductExpiringLeavesASubscriberAlone() async throws {
+        _ = try await engine.processGooglePlayPurchase(
+            notifier: notifier, order: Order(id: orderID, productName: "monthly", isSubscribed: true),
+            orderId: orderID.uuidString,
+            purchase: purchase(state: "SUBSCRIPTION_STATE_EXPIRED", product: "other", basePlan: "other-plan"))
         #expect(store.updates.isEmpty)
         #expect(notifier.sent.isEmpty)
     }
@@ -307,8 +360,19 @@ struct FCMNotifierTests {
             projectID: "my-project", registrationToken: "device-1",
             accessTokenProvider: StaticToken(), transport: transport, now: { sendTime })
         try await notifier.send(IAPPayload(title: "T", subtitle: "", body: ""), collapseID: "cancelled", expiresAt: expiry)
-        let android = try #require(sentMessage(transport)["android"] as? [String: String])
-        #expect(android == ["ttl": "86400s", "priority": "HIGH", "collapseKey": "cancelled"])
+        let android = try #require(sentMessage(transport)["android"] as? [String: Any])
+        #expect(android["ttl"] as? String == "86400s")
+        #expect(android["priority"] as? String == "HIGH")
+        #expect(android["collapseKey"] as? String == "cancelled")
+    }
+
+    /// `collapseKey` only merges messages that are still waiting. The tag replaces one on screen.
+    @Test func repeatedMessageReplacesTheOneAlreadyOnScreen() async throws {
+        let transport = RecordingTransport()
+        try await notifier(transport).send(
+            IAPPayload(title: "T", subtitle: "", body: ""), collapseID: "billing-issue", expiresAt: expiry)
+        let android = try #require(sentMessage(transport)["android"] as? [String: Any])
+        #expect(android["notification"] as? [String: String] == ["tag": "billing-issue"])
     }
 
     @Test func passesBinaryPayloadAsBase64Data() async throws {

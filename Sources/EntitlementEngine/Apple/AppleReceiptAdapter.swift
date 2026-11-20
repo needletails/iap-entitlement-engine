@@ -22,7 +22,8 @@ enum AppleReceiptAdapter {
             throw EntitlementError.transactionMismatch
         }
 
-        let autoRenewEnabled = renewal.autoRenewStatus == "1"
+        // Only Apple saying "off" earns the expiry warning. Having no status is not that.
+        let autoRenewEnabled = renewal.autoRenewStatus.isEmpty || renewal.autoRenewStatus == "1"
         let offer: SubscriptionSnapshot.Offer =
             receipt.isTrialPeriod == "true" ? .trial
             : receipt.isInIntroOfferPeriod == "true" ? .introductory
@@ -48,6 +49,11 @@ enum AppleReceiptAdapter {
 
         let expiresAt = try date(receipt.expiresDateMs, field: "expires_date_ms")
         if expiresAt <= now {
+            // Apple always fills renewal info in, so an empty one means the caller had none, and
+            // a lapsed period then looks the same with or without a grace period.
+            guard !renewal.isMissing else {
+                throw EntitlementError.missingRenewalInfo
+            }
             let grace = try renewal.gracePeriodExpiresDateMs
                 .flatMap { $0.isEmpty ? nil : $0 }
                 .map { try date($0, field: "grace_period_expires_date_ms") }
@@ -67,5 +73,13 @@ enum AppleReceiptAdapter {
             throw EntitlementError.invalidDate(field: field)
         }
         return Date(milliseconds: value)
+    }
+}
+
+private extension PendingRenewalInfo {
+    /// None of the fields the adapter reads is present.
+    var isMissing: Bool {
+        autoRenewStatus.isEmpty && originalTransactionId.isEmpty
+            && (gracePeriodExpiresDateMs ?? "").isEmpty && (isInBillingRetryPeriod ?? "").isEmpty
     }
 }

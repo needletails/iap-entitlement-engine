@@ -25,11 +25,19 @@ struct EntitlementEvaluator: Sendable {
     func evaluate(_ snapshot: SubscriptionSnapshot, order: Order, now: Date) -> EntitlementDecision {
         let wasSubscribed = order.isSubscribed == true
 
+        // What happens to another product, such as a refunded consumable, says nothing about this
+        // subscription.
+        guard concerns(order, productID: snapshot.productID) else {
+            return EntitlementDecision()
+        }
+
         switch snapshot.lifecycle {
         case .pending:
             return EntitlementDecision()
         case .upgraded:
-            return EntitlementDecision(notification: .upgraded)
+            // Once the new product is on the order this is a replay, and was announced the first time.
+            let stillOnTheReplacedProduct = wasSubscribed && order.productName == snapshot.productID
+            return EntitlementDecision(notification: stillOnTheReplacedProduct ? .upgraded : nil)
         case .revoked(let reason):
             let notification: EntitlementNotification = reason == .appIssue ? .cancelledAppIssue : .cancelled
             return EntitlementDecision(isSubscribed: false, notification: wasSubscribed ? notification : nil)
@@ -42,6 +50,12 @@ struct EntitlementEvaluator: Sendable {
         case .active, .gracePeriod:
             return evaluateAccess(snapshot, order: order, wasSubscribed: wasSubscribed, now: now)
         }
+    }
+
+    /// A store reporting no subscription names no product, and still counts. So does a retired
+    /// product for the subscriber who holds it, so their refund or expiry is not lost.
+    private func concerns(_ order: Order, productID: String) -> Bool {
+        productID.isEmpty || catalog.contains(productID) || order.productName == productID
     }
 
     private func evaluateAccess(

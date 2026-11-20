@@ -9,6 +9,9 @@ import Foundation
 ///
 /// Decodes the payload JSON directly, or map them from `AppStoreServerLibrary`'s type of the same
 /// name. Dates are read as Apple's milliseconds whatever date strategy the decoder is set to.
+///
+/// Decoding throws on JSON with no `productId`, which Apple always sends. A value with none means
+/// "no subscription", and that must never come from decoding the wrong JSON.
 public struct AppStoreTransaction: Decodable, Sendable, Equatable {
     public var productId: String?
     public var originalTransactionId: String?
@@ -47,7 +50,7 @@ public struct AppStoreTransaction: Decodable, Sendable, Equatable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
-            productId: try container.decodeIfPresent(String.self, forKey: .productId),
+            productId: try container.decode(String.self, forKey: .productId),
             originalTransactionId: try container.decodeIfPresent(String.self, forKey: .originalTransactionId),
             expiresDate: try container.decodeIfPresent(Int64.self, forKey: .expiresDate).map(Date.init(milliseconds:)),
             isUpgraded: try container.decodeIfPresent(Bool.self, forKey: .isUpgraded),

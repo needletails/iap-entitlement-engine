@@ -5,12 +5,15 @@
 
 /// Thrown when a store payload cannot be trusted. Nothing is persisted or pushed when one of these is thrown.
 public enum EntitlementError: Error, Sendable, Equatable {
-    /// The `orderId` passed to the engine is not a UUID.
+    /// The `orderId` passed to the engine is not a UUID, or is not the ID of the order passed with it.
     case invalidOrderID
     /// A required date is missing or malformed. Access is never granted on a date that cannot be read.
     case invalidDate(field: String)
     /// The Apple receipt or transaction and its renewal info belong to different subscriptions.
     case transactionMismatch
+    /// The paid period has ended and no renewal info was passed, so a grace period cannot be ruled
+    /// out. Fetch the renewal info and process again.
+    case missingRenewalInfo
     /// Google returned a subscription state this version of the SDK does not know about.
     case unsupportedState(String)
     /// `processReceipt` was called on an engine created without an APNs topic and device token.

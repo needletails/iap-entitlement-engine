@@ -13,7 +13,9 @@ import NeedleTailLogger
 /// Turns verified store data into an up-to-date ``Order`` and a user notification.
 ///
 /// The engine trusts its inputs, so verify them with Apple or Google before calling it. Holds no
-/// per-call state, so one engine can safely process many subscriptions at once.
+/// per-call state, so one engine can safely process many subscriptions at once. The one exception
+/// is ``processReceipt(apns:order:orderId:latestReceiptInfo:pendingRenewalInfo:)``, which pushes
+/// to the single device the engine was created with.
 public actor EntitlementEngine {
 
     /// How long APNs and FCM keep trying to deliver a message.
@@ -59,10 +61,11 @@ public actor EntitlementEngine {
             yearly: yearlyProductID))
     }
 
-    /// Applies a verified Apple receipt, then notifies the configured device through APNs.
+    /// Applies a verified Apple receipt, then notifies the device this engine was created with.
     ///
-    /// The order is saved before the push goes out, so a push failure throws but the entitlement
-    /// stays correct.
+    /// Every call pushes to that one device, so this only suits an engine per device. On an engine
+    /// shared between users, pass each user's device with
+    /// ``processReceipt(notifier:order:orderId:latestReceiptInfo:pendingRenewalInfo:)`` instead.
     public func processReceipt(
         apns: some APNSClientProtocol,
         order: Order,
@@ -73,17 +76,31 @@ public actor EntitlementEngine {
         guard !apnTopic.isEmpty, !deviceToken.isEmpty else {
             throw EntitlementError.missingAPNsConfiguration
         }
+        return try await processReceipt(
+            notifier: APNSEntitlementNotifier(client: apns, topic: apnTopic, deviceToken: deviceToken),
+            order: order,
+            orderId: orderId,
+            latestReceiptInfo: latestReceiptInfo,
+            pendingRenewalInfo: pendingRenewalInfo)
+    }
+
+    /// Applies a verified Apple receipt, then notifies the device through `notifier`.
+    ///
+    /// The order is saved before the push goes out, so a push failure throws but the entitlement
+    /// stays correct.
+    public func processReceipt(
+        notifier: some EntitlementNotifier,
+        order: Order,
+        orderId: String,
+        latestReceiptInfo: LatestReceiptInfo,
+        pendingRenewalInfo: PendingRenewalInfo
+    ) async throws -> HTTPResponse.Status {
         let date = now()
         let snapshot = try AppleReceiptAdapter.snapshot(
             latestReceiptInfo: latestReceiptInfo,
             pendingRenewalInfo: pendingRenewalInfo,
             now: date)
-        return try await apply(
-            snapshot,
-            order: order,
-            orderId: orderId,
-            notifier: APNSEntitlementNotifier(client: apns, topic: apnTopic, deviceToken: deviceToken),
-            now: date)
+        return try await apply(snapshot, order: order, orderId: orderId, notifier: notifier, now: date)
     }
 
     /// Applies verified App Store Server API or Notifications V2 data, then notifies the device
@@ -139,7 +156,8 @@ public actor EntitlementEngine {
         notifier: some EntitlementNotifier,
         now date: Date
     ) async throws -> HTTPResponse.Status {
-        guard let id = UUID(uuidString: orderId) else { throw EntitlementError.invalidOrderID }
+        // Saving one order's contents under another order's ID would corrupt both.
+        guard let id = UUID(uuidString: orderId), id == order.id else { throw EntitlementError.invalidOrderID }
 
         let decision = evaluator.evaluate(snapshot, order: order, now: date)
         logger.log(level: .debug, message: "Evaluated \(snapshot.lifecycle) as \(decision)")

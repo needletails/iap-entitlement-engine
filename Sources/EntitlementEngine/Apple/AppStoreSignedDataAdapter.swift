@@ -28,7 +28,8 @@ enum AppStoreSignedDataAdapter {
             throw EntitlementError.transactionMismatch
         }
 
-        let autoRenewEnabled = renewal.autoRenewStatus == autoRenewOn
+        // Only Apple saying "off" earns the expiry warning. Having no status is not that.
+        let autoRenewEnabled = renewal.autoRenewStatus.map { $0 == autoRenewOn } ?? true
         let offer = offer(of: transaction)
 
         func make(_ lifecycle: SubscriptionSnapshot.Lifecycle, expiresAt: Date?) -> SubscriptionSnapshot {
@@ -52,6 +53,11 @@ enum AppStoreSignedDataAdapter {
             throw EntitlementError.invalidDate(field: "expiresDate")
         }
         if expiresAt <= now {
+            // Apple always fills renewal info in, so an empty one means the caller had none, and
+            // a lapsed period then looks the same with or without a grace period.
+            guard renewal != AppStoreRenewalInfo() else {
+                throw EntitlementError.missingRenewalInfo
+            }
             let grace = renewal.gracePeriodExpiresDate
             // Apple also retries during a grace period, and access continues until that ends.
             if renewal.isInBillingRetryPeriod == true, (grace ?? .distantPast) <= now {

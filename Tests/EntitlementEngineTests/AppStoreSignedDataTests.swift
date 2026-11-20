@@ -36,11 +36,12 @@ struct AppStoreSignedDataAdapterTests {
         #expect(!snapshot.autoRenewEnabled)
     }
 
-    @Test func missingAutoRenewStatusIsOff() throws {
+    /// Only Apple saying "off" earns the expiry warning. Having no renewal info is not that.
+    @Test func missingAutoRenewStatusIsNotTreatedAsOff() throws {
         let snapshot = try map(
             AppStoreTransaction(productId: "monthly", expiresDate: future),
             AppStoreRenewalInfo())
-        #expect(!snapshot.autoRenewEnabled)
+        #expect(snapshot.autoRenewEnabled)
     }
 
     @Test func introductoryFreeTrialIsATrial() throws {
@@ -173,6 +174,19 @@ struct AppStoreSignedDataAdapterTests {
         #expect(throws: EntitlementError.invalidDate(field: "expiresDate")) {
             try map(AppStoreTransaction(productId: "monthly"))
         }
+    }
+
+    /// Without renewal info a lapsed period looks the same whether or not Apple is still in a
+    /// grace period, and guessing "expired" would cut off someone Apple is keeping subscribed.
+    @Test func lapsedTransactionWithoutRenewalInfoThrowsInsteadOfGuessing() {
+        #expect(throws: EntitlementError.missingRenewalInfo) {
+            try map(AppStoreTransaction(productId: "monthly", expiresDate: past), AppStoreRenewalInfo())
+        }
+    }
+
+    @Test func renewalInfoIsNotNeededWhileThePaidPeriodRuns() throws {
+        let snapshot = try map(AppStoreTransaction(productId: "monthly", expiresDate: future), AppStoreRenewalInfo())
+        #expect(snapshot.lifecycle == .active)
     }
 
     @Test func renewalInfoForAnotherSubscriptionIsRejected() {
@@ -345,7 +359,7 @@ struct AppStoreSignedDataDecodingTests {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = strategy
         let transaction = try decoder.decode(
-            AppStoreTransaction.self, from: Data(#"{"expiresDate":1800000000000}"#.utf8))
+            AppStoreTransaction.self, from: Data(#"{"productId":"monthly","expiresDate":1800000000000}"#.utf8))
         #expect(transaction.expiresDate == now)
         let renewal = try decoder.decode(
             AppStoreRenewalInfo.self, from: Data(#"{"gracePeriodExpiresDate":1800000000000}"#.utf8))
@@ -355,7 +369,17 @@ struct AppStoreSignedDataDecodingTests {
     @Test(arguments: ["expiresDate", "revocationDate"])
     func malformedTransactionDateThrowsInsteadOfFailingOpen(field: String) {
         #expect(throws: DecodingError.self) {
-            try JSONDecoder().decode(AppStoreTransaction.self, from: Data(#"{"\#(field)":"soon"}"#.utf8))
+            try JSONDecoder().decode(
+                AppStoreTransaction.self, from: Data(#"{"productId":"monthly","\#(field)":"soon"}"#.utf8))
+        }
+    }
+
+    /// Apple always names the product. JSON without one is something else, such as the
+    /// notification's outer payload, and reading it as "no subscription" would end a paid one.
+    @Test(arguments: ["{}", #"{"notificationType":"DID_RENEW","data":{"bundleId":"com.example"}}"#])
+    func jsonThatIsNotATransactionThrows(json: String) {
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(AppStoreTransaction.self, from: Data(json.utf8))
         }
     }
 
@@ -366,9 +390,10 @@ struct AppStoreSignedDataDecodingTests {
         }
     }
 
-    @Test func absentFieldsDecodeToNil() throws {
-        let transaction = try JSONDecoder().decode(AppStoreTransaction.self, from: Data("{}".utf8))
-        #expect(transaction == AppStoreTransaction())
+    @Test func absentOptionalFieldsDecodeToNil() throws {
+        let transaction = try JSONDecoder().decode(
+            AppStoreTransaction.self, from: Data(#"{"productId":"monthly"}"#.utf8))
+        #expect(transaction == AppStoreTransaction(productId: "monthly"))
         let renewal = try JSONDecoder().decode(AppStoreRenewalInfo.self, from: Data("{}".utf8))
         #expect(renewal == AppStoreRenewalInfo())
     }
@@ -473,6 +498,45 @@ struct AppStoreSignedDataEngineTests {
                 notifier: notifier, order: order(subscribed: true), orderId: "not-a-uuid",
                 transaction: active, renewalInfo: renewing)
         }
+    }
+
+    @Test func orderIDThatIsNotTheOrdersOwnSavesNothing() async {
+        await #expect(throws: EntitlementError.invalidOrderID) {
+            _ = try await engine().processAppStoreTransaction(
+                notifier: notifier, order: order(subscribed: false, product: nil), orderId: UUID().uuidString,
+                transaction: active, renewalInfo: renewing)
+        }
+        #expect(store.updates.isEmpty)
+        #expect(notifier.sent.isEmpty)
+    }
+
+    @Test func refundOfAnotherProductLeavesASubscriberAlone() async throws {
+        _ = try await engine().processAppStoreTransaction(
+            notifier: notifier, order: order(subscribed: true), orderId: orderID.uuidString,
+            transaction: AppStoreTransaction(
+                productId: "coins.100", revocationDate: now.addingTimeInterval(-60), revocationReason: 0),
+            renewalInfo: AppStoreRenewalInfo())
+        #expect(store.updates.isEmpty)
+        #expect(notifier.sent.isEmpty)
+    }
+
+    @Test func subscriberIsNotCutOffWhenRenewalInfoIsMissing() async {
+        await #expect(throws: EntitlementError.missingRenewalInfo) {
+            _ = try await engine().processAppStoreTransaction(
+                notifier: notifier, order: order(subscribed: true), orderId: orderID.uuidString,
+                transaction: AppStoreTransaction(productId: "monthly", expiresDate: now.addingTimeInterval(-3_600)),
+                renewalInfo: AppStoreRenewalInfo())
+        }
+        #expect(store.updates.isEmpty)
+        #expect(notifier.sent.isEmpty)
+    }
+
+    @Test func replayedUpgradeIsNotAnnouncedToSomeoneWhoIsNotSubscribed() async throws {
+        _ = try await engine().processAppStoreTransaction(
+            notifier: notifier, order: order(subscribed: false), orderId: orderID.uuidString,
+            transaction: AppStoreTransaction(productId: "monthly", expiresDate: future, isUpgraded: true),
+            renewalInfo: renewing)
+        #expect(notifier.sent.isEmpty)
     }
 
     @Test func untrustworthyPayloadsChangeNothing() async {

@@ -120,8 +120,8 @@ Your server has to handle these parts itself:
 
 - **Notification order:** Apple can deliver notifications late or out of order, and the engine applies whatever it is given. Fetch the current state with Get All Subscription Statuses when a notification arrives, or skip data with an older `signedDate` than you have already processed.
 - **Verification failures:** retry `RETRYABLE_VERIFICATION_FAILURE`, which means Apple's revocation check could not be reached, and return a non-2xx response so Apple resends the notification. Reject everything else.
-- **Renewal info:** pass the `signedRenewalInfo` that came with the transaction. It carries the auto-renew status, grace period and billing retry state.
-- **No subscription:** if Apple returns no transactions, pass `AppStoreTransaction()`, which reports the customer as not subscribed.
+- **Renewal info:** pass the `signedRenewalInfo` that came with the transaction. It carries the auto-renew status, grace period and billing retry state. Without it, the engine throws `EntitlementError.missingRenewalInfo` once the paid period has ended, because it cannot tell an expiry from a grace period.
+- **No subscription:** if Apple returns no transactions, pass `AppStoreTransaction()`, which reports the customer as not subscribed. Decoding never produces that value, because JSON with no `productId` throws.
 
 Any revocation date ends access, including prorated refunds and Family Sharing removals.
 
@@ -132,13 +132,11 @@ let engine = EntitlementEngine(
     storeDelegate: store,
     weeklyProductID: "com.example.weekly",
     monthlyProductID: "com.example.monthly",
-    yearlyProductID: "com.example.yearly",
-    apnTopic: "com.example.app",
-    deviceToken: deviceToken
+    yearlyProductID: "com.example.yearly"
 )
 
 try await engine.processReceipt(
-    apns: apnsClient,
+    notifier: APNSEntitlementNotifier(client: apnsClient, topic: "com.example.app", deviceToken: deviceToken),
     order: order,
     orderId: order.id.uuidString,
     latestReceiptInfo: latestReceiptInfo,
@@ -146,7 +144,9 @@ try await engine.processReceipt(
 )
 ```
 
-`latestReceiptInfo` and `pendingRenewalInfo` use the `verifyReceipt` format, which Apple has deprecated. Pass the most recent transaction for the subscription.
+`latestReceiptInfo` and `pendingRenewalInfo` use the `verifyReceipt` format, which Apple has deprecated. Pass the most recent transaction for the subscription, with its `pending_renewal_info` entry.
+
+The older `processReceipt(apns:...)` pushes to the `apnTopic` and `deviceToken` the engine was created with. Every call goes to that one device, so only use it with an engine per device.
 
 ### Google Play
 
@@ -183,6 +183,7 @@ Your server has to handle these parts itself:
 - **Revocations:** pass `isRevoked: true` for `SUBSCRIPTION_REVOKED`. Google reports revocations as a plain expiry, so the purchase alone cannot show one.
 - **Acknowledgement:** check `purchase.needsAcknowledgement` and acknowledge new purchases. Google refunds purchases that are not acknowledged within three days.
 - **Replaced subscriptions:** after an upgrade or downgrade, map the order to the new purchase token. The old token leaves the order unchanged.
+- **Deferred plan changes:** a plan that has not started yet has no expiry, and is ignored until it does. The customer stays on their current plan without an expiry warning.
 - **Test purchases:** `purchase.isTestPurchase` is exposed so you can decide how to treat them.
 
 ## Behavior
@@ -198,18 +199,28 @@ Your server has to handle these parts itself:
 | Google pause | No | None |
 | Expired | No | None |
 | Refunded or revoked | No | Cancelled |
-| Upgraded (Apple) | Unchanged | Thank you |
+| Upgraded (Apple) | Unchanged | Thank you, while the order still holds the replaced product |
 | Pending or replaced (Google) | Unchanged | None |
-| Unknown product | No | Not subscribed, if they were subscribed |
+| A product outside your three | Unchanged | None |
+
+Events for other products are safe to pass in. A refunded consumable or another subscription lapsing leaves the order alone. A product you have retired still counts for the subscriber whose order holds it, so their refund or expiry ends access.
 
 The order is saved before the push is sent. If saving fails, no push is sent. If the push fails, the error is thrown and the saved entitlement stands. Retrying is safe, but one-off messages are not resent because the order has already changed.
 
-Grace period and expiry warnings repeat each time you process that state. They use a collapse ID, so a new copy replaces the old one on the device, but you should still process on store events rather than on a short timer.
+Grace period and expiry warnings repeat each time you process that state. They use a collapse ID, and a notification tag on Android, so a new copy replaces the old one on the device, but you should still process on store events rather than on a short timer.
 
-Malformed or unknown store data throws an `EntitlementError`, and nothing is saved or sent. Decoding `AppStoreTransaction` or `AppStoreRenewalInfo` throws a `DecodingError` on malformed JSON, before the engine is involved. FCM throws `FCMError.unregistered` when a token goes stale, so you can stop using it.
+Malformed or unknown store data throws an `EntitlementError`, and nothing is saved or sent. `orderId` has to be the ID of the order you pass. Decoding `AppStoreTransaction` or `AppStoreRenewalInfo` throws a `DecodingError` on malformed JSON, and `AppStoreTransaction` also throws on JSON with no `productId`, before the engine is involved. FCM throws `FCMError.unregistered` when a token goes stale, so you can stop using it.
 
 ## Upgrading
 
+- An event for a product outside your three no longer ends the subscription or sends a push. It leaves the order unchanged.
+- `AppStoreTransaction` no longer decodes JSON with no `productId`. `{}` used to decode as "no subscription" and end access.
+- A lapsed Apple transaction or receipt passed with empty renewal info now throws `missingRenewalInfo`. It used to end access, even during a grace period. Missing auto-renew status also no longer triggers the expiry warning.
+- `orderId` has to match `order.id`, or the engine throws `invalidOrderID`.
+- A Google purchase with a deferred plan change no longer throws. The plan that has not started is ignored.
+- The upgrade thank-you is only sent while the order still holds the replaced product, so a replay after the new product is saved stays quiet.
+- `processReceipt(notifier:...)` is new, and sends to the device you pass with each call. `processReceipt(apns:...)` still pushes to the engine's own `deviceToken`.
+- FCM messages now set an Android notification tag, so a repeated message replaces the one on screen.
 - `AsyncHTTPClientFCMTransport` is replaced by `HTTPConnectionFCMTransport`, which takes an `HTTPConnection` and a `Duration` timeout. It does not follow redirects by default.
 - This package no longer uses AsyncHTTPClient and needs `swift-crypto` 5.0.3 or later. Use `HTTPConnectionAPNSClient` for APNs. `processReceipt` and `APNSEntitlementNotifier` still accept any `APNSClientProtocol`, but APNSwift's own `APNSClient` brings AsyncHTTPClient back into your build.
 - To move off `verifyReceipt`, replace `processReceipt` with `processAppStoreTransaction`. Both apply the same rules. The new method takes a notifier, so the engine no longer needs `apnTopic` and `deviceToken`.

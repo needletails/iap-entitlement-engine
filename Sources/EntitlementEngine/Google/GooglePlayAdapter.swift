@@ -16,11 +16,14 @@ enum GooglePlayAdapter {
         isRevoked: Bool
     ) throws -> SubscriptionSnapshot {
         let lifecycle = try lifecycle(of: purchase, isRevoked: isRevoked)
-        let items = purchase.lineItems ?? []
-        let matching = items.filter { catalog.contains(identifier(of: $0, catalog: catalog)) }
-        let candidates = matching.isEmpty ? items : matching
-
         let needsExpiry = lifecycle == .active || lifecycle == .gracePeriod
+        let items = purchase.lineItems ?? []
+        // A line item with no expiry has not started yet, as with a deferred plan change, so it
+        // cannot be what the customer holds now.
+        let started = needsExpiry ? items.filter { $0.expiryTime != nil } : items
+        let matching = started.filter { catalog.contains(identifier(of: $0, catalog: catalog)) }
+        let candidates = matching.isEmpty ? started : matching
+
         let dated = try candidates.map { item -> (item: GooglePlaySubscriptionPurchase.LineItem, expiry: Date?) in
             let expiry = item.expiryTime.flatMap(parseRFC3339)
             if needsExpiry, expiry == nil {
@@ -33,11 +36,13 @@ enum GooglePlayAdapter {
         if needsExpiry, latest == nil {
             throw EntitlementError.invalidDate(field: "expiryTime")
         }
+        // The subscription carries on under the plan that is waiting to start.
+        let continuesOnANewPlan = started.count < items.count
         return SubscriptionSnapshot(
             productID: latest.map { identifier(of: $0.item, catalog: catalog) } ?? "",
             lifecycle: lifecycle,
             expiresAt: latest?.expiry,
-            autoRenewEnabled: latest?.item.autoRenewingPlan?.autoRenewEnabled ?? false,
+            autoRenewEnabled: continuesOnANewPlan || (latest?.item.autoRenewingPlan?.autoRenewEnabled ?? false),
             offer: offer(of: latest?.item))
     }
 

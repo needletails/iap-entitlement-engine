@@ -157,19 +157,44 @@ struct EntitlementEvaluatorTests {
         #expect(decision.notification == nil)
     }
 
-    @Test func refundOfARetiredProductStillRevokes() {
+    @Test func refundOfARetiredProductStillRevokesItsSubscriber() {
         let decision = evaluator.evaluate(
-            snapshot(.revoked(.other), product: "retired"), order: order(subscribed: true), now: now)
+            snapshot(.revoked(.other), product: "retired"), order: order(subscribed: true, product: "retired"), now: now)
+        #expect(decision.isSubscribed == false)
+    }
+
+    // MARK: Other products
+
+    /// A refund for a consumable, or another subscription lapsing, says nothing about this one.
+    @Test(arguments: [
+        SubscriptionSnapshot.Lifecycle.revoked(.other), .expired, .suspended(.billing), .suspended(.paused),
+        .active, .gracePeriod, .upgraded,
+    ])
+    func eventForAnotherProductLeavesASubscriberAlone(lifecycle: SubscriptionSnapshot.Lifecycle) {
+        let decision = evaluator.evaluate(
+            snapshot(lifecycle, product: "coins.100"), order: order(subscribed: true), now: now)
+        #expect(decision == EntitlementDecision())
+    }
+
+    @Test func productOutsideTheCatalogNeverGrantsAccess() {
+        let decision = evaluator.evaluate(
+            snapshot(.active, product: "from-another-app"), order: order(subscribed: false, product: nil), now: now)
+        #expect(decision == EntitlementDecision())
+    }
+
+    @Test func subscriberOnARetiredProductIsNoLongerEntitled() {
+        let decision = evaluator.evaluate(
+            snapshot(.active, product: "retired"), order: order(subscribed: true, product: "retired"), now: now)
+        #expect(decision == .init(isSubscribed: false, productName: nil, notification: .notSubscribed))
+    }
+
+    /// With no product named there is nothing to compare, so the store's verdict stands.
+    @Test func expiryThatNamesNoProductStillEndsAccess() {
+        let decision = evaluator.evaluate(snapshot(.expired, product: ""), order: order(subscribed: true), now: now)
         #expect(decision.isSubscribed == false)
     }
 
     // MARK: Not subscribed
-
-    @Test func unknownProductIsNeverEntitled() {
-        let decision = evaluator.evaluate(
-            snapshot(.active, product: "from-another-app"), order: order(subscribed: true), now: now)
-        #expect(decision == .init(isSubscribed: false, productName: nil, notification: .notSubscribed))
-    }
 
     @Test func lapsedSubscriberWithEmptyReceiptIsRevokedAndTold() {
         let decision = evaluator.evaluate(
@@ -193,6 +218,18 @@ struct EntitlementEvaluatorTests {
     @Test func upgradeThanksTheUserWithoutTouchingAccess() {
         let decision = evaluator.evaluate(snapshot(.upgraded), order: order(subscribed: true), now: now)
         #expect(decision == .init(isSubscribed: nil, productName: nil, notification: .upgraded))
+    }
+
+    @Test func upgradeIsNotAnnouncedToSomeoneWhoIsNotSubscribed() {
+        let decision = evaluator.evaluate(snapshot(.upgraded), order: order(subscribed: false), now: now)
+        #expect(decision == EntitlementDecision())
+    }
+
+    /// Once the new product is on the order, the replaced transaction is a replay.
+    @Test func upgradeIsNotAnnouncedAgainOnceTheNewProductIsSaved() {
+        let decision = evaluator.evaluate(
+            snapshot(.upgraded, product: "monthly"), order: order(subscribed: true, product: "yearly"), now: now)
+        #expect(decision == EntitlementDecision())
     }
 }
 

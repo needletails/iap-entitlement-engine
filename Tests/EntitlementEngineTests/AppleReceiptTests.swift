@@ -33,6 +33,12 @@ struct AppleReceiptAdapterTests {
         #expect(!snapshot.autoRenewEnabled)
     }
 
+    /// Only Apple saying "off" earns the expiry warning. Having no renewal info is not that.
+    @Test func missingAutoRenewStatusIsNotTreatedAsOff() throws {
+        let snapshot = try map(LatestReceiptInfo(productId: "monthly", expiresDateMs: future), PendingRenewalInfo())
+        #expect(snapshot.autoRenewEnabled)
+    }
+
     /// Apple sends both flags. `"false"` on one must not mask `"true"` on the other.
     @Test func trialWithIntroFlagFalseIsATrial() throws {
         let snapshot = try map(LatestReceiptInfo(
@@ -138,6 +144,14 @@ struct AppleReceiptAdapterTests {
     @Test func missingExpiryThrows() {
         #expect(throws: EntitlementError.invalidDate(field: "expires_date_ms")) {
             try map(LatestReceiptInfo(productId: "monthly"))
+        }
+    }
+
+    /// Without renewal info a lapsed period looks the same whether or not Apple is still in a
+    /// grace period, and guessing "expired" would cut off someone Apple is keeping subscribed.
+    @Test func lapsedReceiptWithoutRenewalInfoThrowsInsteadOfGuessing() {
+        #expect(throws: EntitlementError.missingRenewalInfo) {
+            try map(LatestReceiptInfo(productId: "monthly", expiresDateMs: past), PendingRenewalInfo())
         }
     }
 
@@ -333,6 +347,29 @@ struct AppleEngineTests {
         #expect(store.updates.allSatisfy { $0.id == $0.order.id })
     }
 
+    /// One engine serves every user, so the destination has to travel with the call.
+    @Test func sharedEngineSendsEachPushToItsOwnDevice() async throws {
+        let engine = EntitlementEngine(
+            storeDelegate: store, weeklyProductID: "weekly", monthlyProductID: "monthly",
+            yearlyProductID: "yearly", now: { now })
+        let devices = (0..<50).map { (id: UUID(), token: "device-\($0)") }
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for device in devices {
+                group.addTask { [client, future] in
+                    _ = try await engine.processReceipt(
+                        notifier: APNSEntitlementNotifier(
+                            client: client, topic: "com.example.app", deviceToken: device.token),
+                        order: Order(id: device.id, isSubscribed: false),
+                        orderId: device.id.uuidString,
+                        latestReceiptInfo: LatestReceiptInfo(productId: "monthly", expiresDateMs: future),
+                        pendingRenewalInfo: PendingRenewalInfo())
+                }
+            }
+            try await group.waitForAll()
+        }
+        #expect(client.requests.map(\.deviceToken).sorted() == devices.map(\.token).sorted())
+    }
+
     @Test func clockIsReadPerCallNotAtInit() async throws {
         let clock = TestClock(now)
         let engine = EntitlementEngine(
@@ -342,7 +379,7 @@ struct AppleEngineTests {
         _ = try await engine.processReceipt(
             apns: client, order: order(subscribed: true), orderId: orderID.uuidString,
             latestReceiptInfo: LatestReceiptInfo(productId: "monthly", expiresDateMs: future),
-            pendingRenewalInfo: PendingRenewalInfo())
+            pendingRenewalInfo: PendingRenewalInfo(autoRenewStatus: "1"))
         #expect(store.updates.first?.order.isSubscribed == false)
     }
 }

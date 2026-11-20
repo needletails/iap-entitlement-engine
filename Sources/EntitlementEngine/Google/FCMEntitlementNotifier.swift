@@ -100,7 +100,10 @@ public struct FCMEntitlementNotifier: EntitlementNotifier {
                 title: payload.title,
                 // FCM has no subtitle.
                 body: [payload.subtitle, payload.body].filter { !$0.isEmpty }.joined(separator: "\n")),
-            android: .init(ttl: "\(ttl)s", priority: "HIGH", collapseKey: collapseID),
+            // `collapseKey` only merges messages still waiting for the device. The tag replaces
+            // one that is already on screen.
+            android: .init(
+                ttl: "\(ttl)s", priority: "HIGH", collapseKey: collapseID, notification: .init(tag: collapseID)),
             data: payload.data.map { ["payload": $0.base64EncodedString()] }))
 
         var allowed = CharacterSet.urlPathAllowed
@@ -130,9 +133,14 @@ public struct FCMEntitlementNotifier: EntitlementNotifier {
             }
 
             struct Android: Encodable {
+                struct Notification: Encodable {
+                    let tag: String
+                }
+
                 let ttl: String
                 let priority: String
                 let collapseKey: String
+                let notification: Notification
             }
 
             let token: String
