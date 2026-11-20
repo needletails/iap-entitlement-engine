@@ -7,6 +7,10 @@
 
 import Foundation
 
+/// The copy of one message, and optional data for the app.
+///
+/// APNs carries it at the root of the payload beside `aps`. FCM carries `data` base64-encoded as
+/// the data field `payload`, and has no subtitle, so the subtitle is folded into the body.
 public struct IAPPayload: Codable, Sendable, Equatable {
     
     public let title: String

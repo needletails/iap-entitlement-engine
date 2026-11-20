@@ -4,22 +4,49 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Weekly, so a dependency release that breaks the build is found before a user finds it.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
 
 jobs:
   linux:
     runs-on: ubuntu-latest
     container: swift:6.4
     steps:
-      - uses: actions/checkout@v4
-      - run: swift build -c release
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - run: swift build -c release -Xswiftc -warnings-as-errors
       - run: swift test --parallel
+      # Thread Sanitizer cannot build on Swift 6.4: the compiler crashes in swift-collections 1.6.0.
+      # Leak detection is off because the toolchain's own XCTest runner leaks at exit on Linux.
+      - run: swift test --sanitize=address
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+      # Advisory: the tool reports a new case of a @nonexhaustive enum as a break, which this
+      # package allows in a minor release. Read the output, do not rely on the result.
+      - name: Check for breaking API changes
+        continue-on-error: true
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          baseline=$(git tag --list '[0-9]*' --sort=-v:refname | head -n 1)
+          if [ -n "$baseline" ]; then
+            swift package diagnose-api-breaking-changes "$baseline"
+          else
+            echo "No release tag yet, so there is no baseline to compare with."
+          fi
 
   macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: swift-actions/setup-swift@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: swift-actions/setup-swift@364295d9c23900ce04d4e5cc708387921b4e50f9 # v3
         with:
           swift-version: "6.4"
       - run: swift --version
+      - run: swift build -c release -Xswiftc -warnings-as-errors
       - run: swift test --parallel
+

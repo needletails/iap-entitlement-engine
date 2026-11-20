@@ -3,20 +3,15 @@
 //  iap-entitlement-engine
 //
 
-/// The store identifiers this app sells. Anything else is never entitled.
-public struct ProductCatalog: Sendable, Equatable {
-    public let weekly: String
-    public let monthly: String
-    public let yearly: String
+/// The store identifiers this app sells. Anything else never starts a subscription.
+struct ProductCatalog: Sendable, Equatable {
+    let weekly: String
+    let monthly: String
+    let yearly: String
 
-    public init(weekly: String, monthly: String, yearly: String) {
-        self.weekly = weekly
-        self.monthly = monthly
-        self.yearly = yearly
-    }
-
+    /// An empty slot is a plan the app does not sell, so an empty ID is never a product.
     func contains(_ productID: String) -> Bool {
-        productID == weekly || productID == monthly || productID == yearly
+        !productID.isEmpty && (productID == weekly || productID == monthly || productID == yearly)
     }
 
     func activeNotification(for productID: String) -> EntitlementNotification {

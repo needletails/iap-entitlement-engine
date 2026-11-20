@@ -182,10 +182,16 @@ struct EntitlementEvaluatorTests {
         #expect(decision == EntitlementDecision())
     }
 
-    @Test func subscriberOnARetiredProductIsNoLongerEntitled() {
+    @Test func subscriberOnARetiredProductKeepsAccessWhileTheStoreReportsAPaidPeriod() {
         let decision = evaluator.evaluate(
             snapshot(.active, product: "retired"), order: order(subscribed: true, product: "retired"), now: now)
-        #expect(decision == .init(isSubscribed: false, productName: nil, notification: .notSubscribed))
+        #expect(decision == .init(isSubscribed: true, productName: "retired", notification: nil))
+    }
+
+    @Test func retiredProductNeverStartsASubscription() {
+        let decision = evaluator.evaluate(
+            snapshot(.active, product: "retired"), order: order(subscribed: false, product: "retired"), now: now)
+        #expect(decision == .init(isSubscribed: false, productName: nil, notification: nil))
     }
 
     /// With no product named there is nothing to compare, so the store's verdict stands.

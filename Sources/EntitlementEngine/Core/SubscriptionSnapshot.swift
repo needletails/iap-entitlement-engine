@@ -7,9 +7,9 @@ import Foundation
 
 /// A store-neutral view of one subscription. Apple receipts, App Store signed data and Google Play
 /// purchases are all reduced to this.
-public struct SubscriptionSnapshot: Sendable, Equatable {
+struct SubscriptionSnapshot: Sendable, Equatable {
 
-    public enum Lifecycle: Sendable, Equatable {
+    enum Lifecycle: Sendable, Equatable {
         /// The store reports no subscription.
         case notSubscribed
         /// Nothing can be concluded yet, so the order is left as it is.
@@ -27,35 +27,25 @@ public struct SubscriptionSnapshot: Sendable, Equatable {
         case revoked(RevocationReason)
     }
 
-    public enum SuspensionReason: Sendable, Equatable {
+    enum SuspensionReason: Sendable, Equatable {
         case billing, paused
     }
 
-    public enum RevocationReason: Sendable, Equatable {
+    enum RevocationReason: Sendable, Equatable {
         case appIssue, other
     }
 
-    public enum Offer: Sendable, Equatable {
+    enum Offer: Sendable, Equatable {
         case none, trial, introductory
     }
 
-    public let productID: String
-    public let lifecycle: Lifecycle
-    public let expiresAt: Date?
-    public let autoRenewEnabled: Bool
-    public let offer: Offer
-
-    public init(
-        productID: String,
-        lifecycle: Lifecycle,
-        expiresAt: Date?,
-        autoRenewEnabled: Bool,
-        offer: Offer
-    ) {
-        self.productID = productID
-        self.lifecycle = lifecycle
-        self.expiresAt = expiresAt
-        self.autoRenewEnabled = autoRenewEnabled
-        self.offer = offer
-    }
+    let productID: String
+    let lifecycle: Lifecycle
+    let expiresAt: Date?
+    let autoRenewEnabled: Bool
+    let offer: Offer
+    /// The data is about a period before the subscription's latest one, so its product may be
+    /// one the subscriber has since left. It can keep access open, but not start it or name
+    /// the order's product.
+    var isEarlierPeriod = false
 }

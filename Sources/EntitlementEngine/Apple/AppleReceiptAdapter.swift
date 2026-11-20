@@ -14,6 +14,11 @@ enum AppleReceiptAdapter {
         now: Date
     ) throws -> SubscriptionSnapshot {
         guard !receipt.productId.isEmpty else {
+            // Only an empty row means Apple returned no purchase. One that lost its product on
+            // the way must not end a paid subscription.
+            guard receipt.isEmpty else {
+                throw EntitlementError.missingProductID
+            }
             return SubscriptionSnapshot(
                 productID: "", lifecycle: .notSubscribed, expiresAt: nil, autoRenewEnabled: false, offer: .none)
         }
@@ -49,8 +54,8 @@ enum AppleReceiptAdapter {
 
         let expiresAt = try date(receipt.expiresDateMs, field: "expires_date_ms")
         if expiresAt <= now {
-            // Apple always fills renewal info in, so an empty one means the caller had none, and
-            // a lapsed period then looks the same with or without a grace period.
+            // An empty value means the caller passed none, and a lapsed period then looks the
+            // same with or without a grace period.
             guard !renewal.isMissing else {
                 throw EntitlementError.missingRenewalInfo
             }
@@ -73,6 +78,22 @@ enum AppleReceiptAdapter {
             throw EntitlementError.invalidDate(field: field)
         }
         return Date(milliseconds: value)
+    }
+}
+
+private extension LatestReceiptInfo {
+    /// Nothing is set. An optional field that is an empty string counts as not set, as it does
+    /// everywhere else in this adapter.
+    var isEmpty: Bool {
+        var row = self
+        if row.cancellationDate?.isEmpty == true { row.cancellationDate = nil }
+        if row.cancellationDateMs?.isEmpty == true { row.cancellationDateMs = nil }
+        if row.cancellationDatePst?.isEmpty == true { row.cancellationDatePst = nil }
+        if row.cancellationReason?.isEmpty == true { row.cancellationReason = nil }
+        if row.isUpgraded?.isEmpty == true { row.isUpgraded = nil }
+        if row.offerCodeRefName?.isEmpty == true { row.offerCodeRefName = nil }
+        if row.promotionalOfferId?.isEmpty == true { row.promotionalOfferId = nil }
+        return row == LatestReceiptInfo()
     }
 }
 

@@ -5,109 +5,75 @@
 //  Created by Cole M on 5/30/23.
 //
 
-import APNSCore
 import Foundation
-import HTTPTypes
-import NeedleTailLogger
 
 /// Turns verified store data into an up-to-date ``Order`` and a user notification.
 ///
-/// The engine trusts its inputs, so verify them with Apple or Google before calling it. Holds no
-/// per-call state, so one engine can safely process many subscriptions at once. The one exception
-/// is ``processReceipt(apns:order:orderId:latestReceiptInfo:pendingRenewalInfo:)``, which pushes
-/// to the single device the engine was created with.
+/// The engine trusts its inputs, so verify them with Apple or Google before calling it. It holds
+/// no per-call state, so one engine can safely process many subscriptions at once.
+///
+/// A process call throws only when nothing was saved. Once the order is saved the call always
+/// returns, and a push that failed is reported in ``EntitlementResult/pushFailure``.
 public actor EntitlementEngine {
 
     /// How long APNs and FCM keep trying to deliver a message.
     private static let notificationLifetime: TimeInterval = 86_400
 
-    public let storeDelegate: EntitlementStoreDelegate
-    public let weeklyProductID: String
-    public let monthlyProductID: String
-    public let yearlyProductID: String
-    public let apnTopic: String
-    public let deviceToken: String
-    public let messages: EntitlementMessages
+    private let storeDelegate: any EntitlementStoreDelegate
+    private let messages: EntitlementMessages
     private let now: @Sendable () -> Date
     private let evaluator: EntitlementEvaluator
-    private let logger = NeedleTailLogger("[IAPEntitlementEngine]")
-
-    public nonisolated var currentDate: Date { now() }
 
     /// - Parameters:
-    ///   - apnTopic: Required for ``processReceipt(apns:order:orderId:latestReceiptInfo:pendingRenewalInfo:)``.
-    ///   - deviceToken: Required for ``processReceipt(apns:order:orderId:latestReceiptInfo:pendingRenewalInfo:)``.
+    ///   - storeDelegate: Saves an order when the engine changes it.
+    ///   - weeklyProductID: The store product ID of the weekly plan, or the Play base plan ID.
+    ///     Pass an empty string for a plan you do not sell. The same goes for the other two.
+    ///   - retiredProductIDs: Products you no longer sell that still have subscribers. An order
+    ///     on one of them keeps access either way. Listing it also lets that order get access
+    ///     back after a billing retry, an account hold or a pause.
+    ///   - messages: The copy for each notification.
+    ///   - now: The clock. Keep the server's clock in sync, because an expiry is judged by it.
     public init(
-        storeDelegate: EntitlementStoreDelegate,
+        storeDelegate: any EntitlementStoreDelegate,
         weeklyProductID: String,
         monthlyProductID: String,
         yearlyProductID: String,
-        apnTopic: String = "",
-        deviceToken: String = "",
+        retiredProductIDs: Set<String> = [],
         messages: EntitlementMessages = .default,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.storeDelegate = storeDelegate
-        self.weeklyProductID = weeklyProductID
-        self.monthlyProductID = monthlyProductID
-        self.yearlyProductID = yearlyProductID
-        self.apnTopic = apnTopic
-        self.deviceToken = deviceToken
         self.messages = messages
         self.now = now
-        self.evaluator = EntitlementEvaluator(catalog: ProductCatalog(
-            weekly: weeklyProductID,
-            monthly: monthlyProductID,
-            yearly: yearlyProductID))
-    }
-
-    /// Applies a verified Apple receipt, then notifies the device this engine was created with.
-    ///
-    /// Every call pushes to that one device, so this only suits an engine per device. On an engine
-    /// shared between users, pass each user's device with
-    /// ``processReceipt(notifier:order:orderId:latestReceiptInfo:pendingRenewalInfo:)`` instead.
-    public func processReceipt(
-        apns: some APNSClientProtocol,
-        order: Order,
-        orderId: String,
-        latestReceiptInfo: LatestReceiptInfo,
-        pendingRenewalInfo: PendingRenewalInfo
-    ) async throws -> HTTPResponse.Status {
-        guard !apnTopic.isEmpty, !deviceToken.isEmpty else {
-            throw EntitlementError.missingAPNsConfiguration
-        }
-        return try await processReceipt(
-            notifier: APNSEntitlementNotifier(client: apns, topic: apnTopic, deviceToken: deviceToken),
-            order: order,
-            orderId: orderId,
-            latestReceiptInfo: latestReceiptInfo,
-            pendingRenewalInfo: pendingRenewalInfo)
+        self.evaluator = EntitlementEvaluator(
+            catalog: ProductCatalog(weekly: weeklyProductID, monthly: monthlyProductID, yearly: yearlyProductID),
+            retired: retiredProductIDs)
     }
 
     /// Applies a verified Apple receipt, then notifies the device through `notifier`.
     ///
-    /// The order is saved before the push goes out, so a push failure throws but the entitlement
-    /// stays correct.
+    /// - Parameters:
+    ///   - latestReceiptInfo: The subscription's most recent row of `latest_receipt_info`.
+    ///   - pendingRenewalInfo: Its entry in `pending_renewal_info`.
     public func processReceipt(
         notifier: some EntitlementNotifier,
         order: Order,
-        orderId: String,
         latestReceiptInfo: LatestReceiptInfo,
         pendingRenewalInfo: PendingRenewalInfo
-    ) async throws -> HTTPResponse.Status {
+    ) async throws -> EntitlementResult {
+        guard evaluator.concerns(order, productID: latestReceiptInfo.productId) else {
+            return unchanged(order)
+        }
         let date = now()
         let snapshot = try AppleReceiptAdapter.snapshot(
             latestReceiptInfo: latestReceiptInfo,
             pendingRenewalInfo: pendingRenewalInfo,
             now: date)
-        return try await apply(snapshot, order: order, orderId: orderId, notifier: notifier, now: date)
+        return try await apply(snapshot, order: order, notifier: notifier, now: date)
     }
 
     /// Applies verified App Store Server API or Notifications V2 data, then notifies the device
     /// through `notifier`.
-    ///
-    /// The order is saved before the push goes out, so a push failure throws but the entitlement
-    /// stays correct.
     ///
     /// - Parameters:
     ///   - transaction: The decoded `signedTransactionInfo`. Verify its signature first.
@@ -115,22 +81,21 @@ public actor EntitlementEngine {
     public func processAppStoreTransaction(
         notifier: some EntitlementNotifier,
         order: Order,
-        orderId: String,
         transaction: AppStoreTransaction,
         renewalInfo: AppStoreRenewalInfo
-    ) async throws -> HTTPResponse.Status {
+    ) async throws -> EntitlementResult {
+        guard evaluator.concerns(order, productID: transaction.productId ?? "") else {
+            return unchanged(order)
+        }
         let date = now()
         let snapshot = try AppStoreSignedDataAdapter.snapshot(
             transaction: transaction,
             renewalInfo: renewalInfo,
             now: date)
-        return try await apply(snapshot, order: order, orderId: orderId, notifier: notifier, now: date)
+        return try await apply(snapshot, order: order, notifier: notifier, now: date)
     }
 
     /// Applies a verified Google Play purchase, then notifies the device through `notifier`.
-    ///
-    /// The order is saved before the push goes out, so a push failure throws but the entitlement
-    /// stays correct.
     ///
     /// - Parameters:
     ///   - purchase: The response of `purchases.subscriptionsv2.get`.
@@ -138,29 +103,32 @@ public actor EntitlementEngine {
     public func processGooglePlayPurchase(
         notifier: some EntitlementNotifier,
         order: Order,
-        orderId: String,
         purchase: GooglePlaySubscriptionPurchase,
         isRevoked: Bool = false
-    ) async throws -> HTTPResponse.Status {
+    ) async throws -> EntitlementResult {
+        let date = now()
         let snapshot = try GooglePlayAdapter.snapshot(
             purchase: purchase,
             catalog: evaluator.catalog,
-            isRevoked: isRevoked)
-        return try await apply(snapshot, order: order, orderId: orderId, notifier: notifier, now: now())
+            held: order.productName,
+            isRevoked: isRevoked,
+            now: date)
+        return try await apply(snapshot, order: order, notifier: notifier, now: date)
+    }
+
+    /// An event for a product that is neither sold nor held says nothing about this order, so it
+    /// is not read any further. A one-time purchase has no expiry to read anyway.
+    private func unchanged(_ order: Order) -> EntitlementResult {
+        EntitlementResult(order: order, didSave: false, accessExpiresAt: nil, notification: nil, pushFailure: nil)
     }
 
     private func apply(
         _ snapshot: SubscriptionSnapshot,
         order: Order,
-        orderId: String,
         notifier: some EntitlementNotifier,
         now date: Date
-    ) async throws -> HTTPResponse.Status {
-        // Saving one order's contents under another order's ID would corrupt both.
-        guard let id = UUID(uuidString: orderId), id == order.id else { throw EntitlementError.invalidOrderID }
-
+    ) async throws -> EntitlementResult {
         let decision = evaluator.evaluate(snapshot, order: order, now: date)
-        logger.log(level: .debug, message: "Evaluated \(snapshot.lifecycle) as \(decision)")
 
         var updated = order
         if let isSubscribed = decision.isSubscribed {
@@ -169,17 +137,31 @@ public actor EntitlementEngine {
         if let productName = decision.productName {
             updated.productName = productName
         }
-        if updated != order {
+        let changed = updated != order
+        if changed {
             updated.updatedAt = date
-            try await storeDelegate.updateOrder(new: updated, id: id)
+            try await storeDelegate.updateOrder(updated, replacing: order)
         }
 
+        // The order is saved, so from here a failure is reported rather than thrown. A caller
+        // that answered its webhook with an error would have the store redeliver an event that
+        // was already applied.
+        var pushFailure: (any Error)?
         if let notification = decision.notification {
-            try await notifier.send(
-                messages.payload(for: notification),
-                collapseID: notification.collapseID,
-                expiresAt: date.addingTimeInterval(Self.notificationLifetime))
+            do {
+                try await notifier.send(
+                    messages.payload(for: notification),
+                    for: notification,
+                    expiresAt: date.addingTimeInterval(Self.notificationLifetime))
+            } catch {
+                pushFailure = error
+            }
         }
-        return .ok
+        return EntitlementResult(
+            order: updated,
+            didSave: changed,
+            accessExpiresAt: decision.isSubscribed == true ? snapshot.expiresAt : nil,
+            notification: decision.notification,
+            pushFailure: pushFailure)
     }
 }

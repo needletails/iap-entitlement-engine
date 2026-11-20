@@ -12,25 +12,32 @@ func milliseconds(_ date: Date) -> String { String(date.millisecondsSince1970) }
 let catalog = ProductCatalog(weekly: "weekly", monthly: "monthly", yearly: "yearly")
 
 final class RecordingStore: EntitlementStoreDelegate {
-    private let state = Mutex<[(order: Order, id: UUID)]>([])
+    private let state = Mutex<[(order: Order, previous: Order)]>([])
     let failure: (any Error)?
 
     init(failure: (any Error)? = nil) {
         self.failure = failure
     }
 
-    var updates: [(order: Order, id: UUID)] { state.withLock { $0 } }
+    var updates: [(order: Order, previous: Order)] { state.withLock { $0 } }
 
-    func updateOrder(new order: Order, id: UUID) async throws {
+    func updateOrder(_ order: Order, replacing previous: Order) async throws {
         if let failure { throw failure }
-        state.withLock { $0.append((order, id)) }
+        state.withLock { $0.append((order, previous)) }
     }
 }
 
 struct Sent: Sendable, Equatable {
     let payload: IAPPayload
-    let collapseID: String
+    let notification: EntitlementNotification
     let expiresAt: Date
+
+    var collapseID: String { notification.collapseID }
+}
+
+/// The device most APNs tests push to.
+func device(_ client: FakeAPNSClient) -> APNSEntitlementNotifier {
+    APNSEntitlementNotifier(client: client, topic: "com.example.app", deviceToken: "abcd")
 }
 
 final class RecordingNotifier: EntitlementNotifier {
@@ -43,9 +50,9 @@ final class RecordingNotifier: EntitlementNotifier {
 
     var sent: [Sent] { state.withLock { $0 } }
 
-    func send(_ payload: IAPPayload, collapseID: String, expiresAt: Date) async throws {
+    func send(_ payload: IAPPayload, for notification: EntitlementNotification, expiresAt: Date) async throws {
         if let failure { throw failure }
-        state.withLock { $0.append(Sent(payload: payload, collapseID: collapseID, expiresAt: expiresAt)) }
+        state.withLock { $0.append(Sent(payload: payload, notification: notification, expiresAt: expiresAt)) }
     }
 }
 
@@ -55,6 +62,7 @@ struct CapturedRequest: Sendable {
     let topic: String?
     let collapseID: String?
     let expiration: Int?
+    let priority: Int?
     let json: Data
 }
 
@@ -76,6 +84,7 @@ final class FakeAPNSClient: APNSClientProtocol {
             topic: request.topic,
             collapseID: request.collapseID,
             expiration: request.expiration?.expiration,
+            priority: request.priority?.rawValue,
             json: try JSONEncoder().encode(request.message))
         state.withLock { $0.append(captured) }
         return APNSResponse()

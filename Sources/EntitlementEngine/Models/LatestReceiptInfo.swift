@@ -7,7 +7,9 @@
 
 import Foundation
 
-public struct LatestReceiptInfo: Codable, Sendable {
+/// One row of `latest_receipt_info` in a `verifyReceipt` response. An empty value means Apple
+/// returned no purchase.
+public struct LatestReceiptInfo: Codable, Sendable, Equatable {
     public var quantity: String
     public var productId: String
     public var transactionId: String
@@ -83,6 +85,40 @@ public struct LatestReceiptInfo: Codable, Sendable {
         self.promotionalOfferId = promotionalOfferId
     }
     
+    /// `latest_receipt_info` lists every purchase, and only subscriptions carry every key, so a
+    /// missing one reads as empty. A row with no product is not a purchase.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        func text(_ key: CodingKeys) throws -> String {
+            try container.decodeIfPresent(String.self, forKey: key) ?? ""
+        }
+        self.init(
+            quantity: try text(.quantity),
+            productId: try container.decode(String.self, forKey: .productId),
+            transactionId: try text(.transactionId),
+            originalTransactionId: try text(.originalTransactionId),
+            purchaseDate: try text(.purchaseDate),
+            purchaseDateMs: try text(.purchaseDateMs),
+            purchaseDatePst: try text(.purchaseDatePst),
+            originalPurchaseDate: try text(.originalPurchaseDate),
+            originalPurchaseDateMs: try text(.originalPurchaseDateMs),
+            originalPurchaseDatePst: try text(.originalPurchaseDatePst),
+            expiresDate: try text(.expiresDate),
+            expiresDateMs: try text(.expiresDateMs),
+            expiresDatePst: try text(.expiresDatePst),
+            webOrderLineItemId: try text(.webOrderLineItemId),
+            isTrialPeriod: try text(.isTrialPeriod),
+            isInIntroOfferPeriod: try text(.isInIntroOfferPeriod),
+            subscriptionGroupIdentifier: try text(.subscriptionGroupIdentifier),
+            cancellationDate: try container.decodeIfPresent(String.self, forKey: .cancellationDate),
+            cancellationDateMs: try container.decodeIfPresent(String.self, forKey: .cancellationDateMs),
+            cancellationDatePst: try container.decodeIfPresent(String.self, forKey: .cancellationDatePst),
+            cancellationReason: try container.decodeIfPresent(String.self, forKey: .cancellationReason),
+            isUpgraded: try container.decodeIfPresent(String.self, forKey: .isUpgraded),
+            offerCodeRefName: try container.decodeIfPresent(String.self, forKey: .offerCodeRefName),
+            promotionalOfferId: try container.decodeIfPresent(String.self, forKey: .promotionalOfferId))
+    }
+
     private enum CodingKeys: String, CodingKey {
         case quantity
         case productId = "product_id"

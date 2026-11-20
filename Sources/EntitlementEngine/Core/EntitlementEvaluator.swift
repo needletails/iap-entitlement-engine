@@ -21,6 +21,8 @@ struct EntitlementEvaluator: Sendable {
     private static let expiryWarningWindow: TimeInterval = 86_400
 
     let catalog: ProductCatalog
+    /// Products that are no longer sold but still have subscribers.
+    var retired: Set<String> = []
 
     func evaluate(_ snapshot: SubscriptionSnapshot, order: Order, now: Date) -> EntitlementDecision {
         let wasSubscribed = order.isSubscribed == true
@@ -47,6 +49,13 @@ struct EntitlementEvaluator: Sendable {
             return EntitlementDecision(isSubscribed: false)
         case .suspended(.billing):
             return EntitlementDecision(isSubscribed: false, notification: wasSubscribed ? .billingIssue : nil)
+        case .gracePeriod where snapshot.isEarlierPeriod:
+            // The store is keeping the subscription open, so a subscriber keeps access and is
+            // asked for payment. Nothing here says which product they are on now.
+            guard wasSubscribed, let expiresAt = snapshot.expiresAt, expiresAt > now else {
+                return EntitlementDecision()
+            }
+            return EntitlementDecision(isSubscribed: true, notification: .billingIssue)
         case .active, .gracePeriod:
             return evaluateAccess(snapshot, order: order, wasSubscribed: wasSubscribed, now: now)
         }
@@ -54,7 +63,7 @@ struct EntitlementEvaluator: Sendable {
 
     /// A store reporting no subscription names no product, and still counts. So does a retired
     /// product for the subscriber who holds it, so their refund or expiry is not lost.
-    private func concerns(_ order: Order, productID: String) -> Bool {
+    func concerns(_ order: Order, productID: String) -> Bool {
         productID.isEmpty || catalog.contains(productID) || order.productName == productID
     }
 
@@ -64,7 +73,15 @@ struct EntitlementEvaluator: Sendable {
         wasSubscribed: Bool,
         now: Date
     ) -> EntitlementDecision {
-        guard catalog.contains(snapshot.productID) else {
+        // A product that has left the catalog keeps the subscriber it already has for as long as
+        // the store reports a running period. It never starts a subscription, so a product name
+        // the caller wrote cannot buy access. The one exception is a product the app itself names
+        // as retired: the order that holds it gets access back when the store resumes charging,
+        // as after a billing retry, an account hold or a pause.
+        let isSold = catalog.contains(snapshot.productID)
+        let holdsIt = !snapshot.productID.isEmpty && order.productName == snapshot.productID
+        let keepsARetiredProduct = holdsIt && (wasSubscribed || retired.contains(snapshot.productID))
+        guard isSold || keepsARetiredProduct else {
             return EntitlementDecision(isSubscribed: false, notification: wasSubscribed ? .notSubscribed : nil)
         }
         guard let expiresAt = snapshot.expiresAt, expiresAt > now else {
@@ -74,13 +91,17 @@ struct EntitlementEvaluator: Sendable {
         let notification: EntitlementNotification?
         if snapshot.lifecycle == .gracePeriod {
             notification = .billingIssue
+        } else if !wasSubscribed, !isSold {
+            // A retired product has no plan to announce.
+            notification = nil
         } else if !wasSubscribed {
             switch snapshot.offer {
             case .trial: notification = .trialStarted
             case .introductory: notification = .introOfferStarted
             case .none: notification = catalog.activeNotification(for: snapshot.productID)
             }
-        } else if order.productName != snapshot.productID {
+        } else if let held = order.productName, !held.isEmpty, held != snapshot.productID {
+            // An order saved as subscribed without its product is adopted, not welcomed again.
             notification = catalog.activeNotification(for: snapshot.productID)
         } else if !snapshot.autoRenewEnabled, expiresAt.timeIntervalSince(now) <= Self.expiryWarningWindow {
             notification = .expiringToday

@@ -14,9 +14,13 @@ struct AppStoreSignedDataAdapterTests {
         try AppStoreSignedDataAdapter.snapshot(transaction: transaction, renewalInfo: renewal, now: now)
     }
 
-    @Test func emptyProductIsNotSubscribed() throws {
+    @Test func emptyTransactionIsNotSubscribed() throws {
         #expect(try map(AppStoreTransaction()).lifecycle == .notSubscribed)
-        #expect(try map(AppStoreTransaction(productId: "")).lifecycle == .notSubscribed)
+    }
+
+    @Test func transactionWithNoProductButOtherFieldsThrows() {
+        #expect(throws: EntitlementError.missingProductID) { try map(AppStoreTransaction(productId: "")) }
+        #expect(throws: EntitlementError.missingProductID) { try map(AppStoreTransaction(expiresDate: future)) }
     }
 
     @Test func activeTransactionMaps() throws {
@@ -349,7 +353,8 @@ struct AppStoreSignedDataDecodingTests {
             originalTransactionId: "12345",
             autoRenewStatus: 1,
             gracePeriodExpiresDate: Date(milliseconds: 1_800_000_000_789),
-            isInBillingRetryPeriod: true))
+            isInBillingRetryPeriod: true,
+            renewalDate: Date(milliseconds: 1_798_148_850_000)))
     }
 
     /// Foundation's default strategy reads a number as seconds since 2001, which would turn a
@@ -422,36 +427,38 @@ struct AppStoreSignedDataEngineTests {
 
     @Test func activeSubscriberIsNeverToldTheyCancelled() async throws {
         _ = try await engine().processAppStoreTransaction(
-            notifier: notifier, order: order(subscribed: true), orderId: orderID.uuidString,
+            notifier: notifier, order: order(subscribed: true),
             transaction: active, renewalInfo: renewing)
         #expect(notifier.sent.isEmpty)
         #expect(store.updates.isEmpty)
     }
 
     @Test func newSubscriberIsSavedThenWelcomed() async throws {
-        let status = try await engine().processAppStoreTransaction(
-            notifier: notifier, order: order(subscribed: false, product: nil), orderId: orderID.uuidString,
+        let result = try await engine().processAppStoreTransaction(
+            notifier: notifier, order: order(subscribed: false, product: nil),
             transaction: active, renewalInfo: renewing)
 
-        #expect(status == .ok)
+        #expect(result.didSave)
+        #expect(result.order.isSubscribed == true)
         #expect(store.updates.first?.order.isSubscribed == true)
         #expect(store.updates.first?.order.productName == "monthly")
         #expect(notifier.sent.map(\.collapseID) == ["monthly-active"])
     }
 
     @Test func refundRevokesThenNotifies() async throws {
-        let status = try await engine().processAppStoreTransaction(
-            notifier: notifier, order: order(subscribed: true), orderId: orderID.uuidString,
+        let result = try await engine().processAppStoreTransaction(
+            notifier: notifier, order: order(subscribed: true),
             transaction: AppStoreTransaction(
                 productId: "monthly", expiresDate: future,
                 revocationDate: now.addingTimeInterval(-60), revocationReason: 0),
             renewalInfo: AppStoreRenewalInfo())
 
-        #expect(status == .ok)
+        #expect(result.order.isSubscribed == false)
+        #expect(result.accessExpiresAt == nil)
         #expect(store.updates.count == 1)
         #expect(store.updates.first?.order.isSubscribed == false)
         #expect(store.updates.first?.order.updatedAt == now)
-        #expect(store.updates.first?.id == orderID)
+        #expect(store.updates.first?.order.id == orderID)
         #expect(notifier.sent.map(\.collapseID) == ["cancelled"])
     }
 
@@ -459,21 +466,21 @@ struct AppStoreSignedDataEngineTests {
         let lapsed = AppStoreTransaction(productId: "monthly", expiresDate: now.addingTimeInterval(-60))
         let retrying = AppStoreRenewalInfo(autoRenewStatus: 1, isInBillingRetryPeriod: true)
         _ = try await engine().processAppStoreTransaction(
-            notifier: notifier, order: order(subscribed: true), orderId: orderID.uuidString,
+            notifier: notifier, order: order(subscribed: true),
             transaction: lapsed, renewalInfo: retrying)
         #expect(store.updates.first?.order.isSubscribed == false)
         #expect(notifier.sent.map(\.collapseID) == ["billing-issue"])
 
         let saved = try #require(store.updates.first?.order)
         _ = try await engine().processAppStoreTransaction(
-            notifier: notifier, order: saved, orderId: orderID.uuidString,
+            notifier: notifier, order: saved,
             transaction: lapsed, renewalInfo: retrying)
         #expect(notifier.sent.count == 1)
     }
 
     @Test func pushExpiryIsInTheFuture() async throws {
         _ = try await engine().processAppStoreTransaction(
-            notifier: notifier, order: order(subscribed: false, product: nil), orderId: orderID.uuidString,
+            notifier: notifier, order: order(subscribed: false, product: nil),
             transaction: active, renewalInfo: renewing)
         #expect(notifier.sent.first?.expiresAt == now.addingTimeInterval(86_400))
     }
@@ -483,7 +490,7 @@ struct AppStoreSignedDataEngineTests {
         let client = FakeAPNSClient()
         _ = try await engine().processAppStoreTransaction(
             notifier: APNSEntitlementNotifier(client: client, topic: "com.example.app", deviceToken: "abcd"),
-            order: order(subscribed: false, product: nil), orderId: orderID.uuidString,
+            order: order(subscribed: false, product: nil),
             transaction: active, renewalInfo: renewing)
 
         let request = try #require(client.requests.first)
@@ -492,27 +499,9 @@ struct AppStoreSignedDataEngineTests {
         #expect(request.collapseID == "monthly-active")
     }
 
-    @Test func invalidOrderIDThrows() async {
-        await #expect(throws: EntitlementError.invalidOrderID) {
-            _ = try await engine().processAppStoreTransaction(
-                notifier: notifier, order: order(subscribed: true), orderId: "not-a-uuid",
-                transaction: active, renewalInfo: renewing)
-        }
-    }
-
-    @Test func orderIDThatIsNotTheOrdersOwnSavesNothing() async {
-        await #expect(throws: EntitlementError.invalidOrderID) {
-            _ = try await engine().processAppStoreTransaction(
-                notifier: notifier, order: order(subscribed: false, product: nil), orderId: UUID().uuidString,
-                transaction: active, renewalInfo: renewing)
-        }
-        #expect(store.updates.isEmpty)
-        #expect(notifier.sent.isEmpty)
-    }
-
     @Test func refundOfAnotherProductLeavesASubscriberAlone() async throws {
         _ = try await engine().processAppStoreTransaction(
-            notifier: notifier, order: order(subscribed: true), orderId: orderID.uuidString,
+            notifier: notifier, order: order(subscribed: true),
             transaction: AppStoreTransaction(
                 productId: "coins.100", revocationDate: now.addingTimeInterval(-60), revocationReason: 0),
             renewalInfo: AppStoreRenewalInfo())
@@ -523,7 +512,7 @@ struct AppStoreSignedDataEngineTests {
     @Test func subscriberIsNotCutOffWhenRenewalInfoIsMissing() async {
         await #expect(throws: EntitlementError.missingRenewalInfo) {
             _ = try await engine().processAppStoreTransaction(
-                notifier: notifier, order: order(subscribed: true), orderId: orderID.uuidString,
+                notifier: notifier, order: order(subscribed: true),
                 transaction: AppStoreTransaction(productId: "monthly", expiresDate: now.addingTimeInterval(-3_600)),
                 renewalInfo: AppStoreRenewalInfo())
         }
@@ -533,7 +522,7 @@ struct AppStoreSignedDataEngineTests {
 
     @Test func replayedUpgradeIsNotAnnouncedToSomeoneWhoIsNotSubscribed() async throws {
         _ = try await engine().processAppStoreTransaction(
-            notifier: notifier, order: order(subscribed: false), orderId: orderID.uuidString,
+            notifier: notifier, order: order(subscribed: false),
             transaction: AppStoreTransaction(productId: "monthly", expiresDate: future, isUpgraded: true),
             renewalInfo: renewing)
         #expect(notifier.sent.isEmpty)
@@ -543,12 +532,12 @@ struct AppStoreSignedDataEngineTests {
         let order = order(subscribed: true)
         await #expect(throws: EntitlementError.invalidDate(field: "expiresDate")) {
             _ = try await engine().processAppStoreTransaction(
-                notifier: notifier, order: order, orderId: orderID.uuidString,
+                notifier: notifier, order: order,
                 transaction: AppStoreTransaction(productId: "monthly"), renewalInfo: renewing)
         }
         await #expect(throws: EntitlementError.transactionMismatch) {
             _ = try await engine().processAppStoreTransaction(
-                notifier: notifier, order: order, orderId: orderID.uuidString,
+                notifier: notifier, order: order,
                 transaction: AppStoreTransaction(
                     productId: "monthly", originalTransactionId: "1", expiresDate: future),
                 renewalInfo: AppStoreRenewalInfo(originalTransactionId: "2"))
@@ -561,19 +550,21 @@ struct AppStoreSignedDataEngineTests {
         let failing = RecordingStore(failure: TestFailure.boom)
         await #expect(throws: TestFailure.boom) {
             _ = try await engine(store: failing).processAppStoreTransaction(
-                notifier: notifier, order: order(subscribed: false, product: nil), orderId: orderID.uuidString,
+                notifier: notifier, order: order(subscribed: false, product: nil),
                 transaction: active, renewalInfo: renewing)
         }
         #expect(notifier.sent.isEmpty)
     }
 
-    @Test func pushFailurePropagatesAfterEntitlementIsSaved() async {
+    /// A throw means nothing was saved, so a failed push must come back in the result instead.
+    @Test func pushFailureIsReportedAfterTheEntitlementIsSaved() async throws {
         let failing = RecordingNotifier(failure: TestFailure.boom)
-        await #expect(throws: TestFailure.boom) {
-            _ = try await engine().processAppStoreTransaction(
-                notifier: failing, order: order(subscribed: false, product: nil), orderId: orderID.uuidString,
-                transaction: active, renewalInfo: renewing)
-        }
+        let result = try await engine().processAppStoreTransaction(
+            notifier: failing, order: order(subscribed: false, product: nil),
+            transaction: active, renewalInfo: renewing)
+        #expect(result.pushFailure as? TestFailure == .boom)
+        #expect(result.notification == .monthlyActive)
+        #expect(result.didSave)
         #expect(store.updates.count == 1)
     }
 
@@ -586,15 +577,14 @@ struct AppStoreSignedDataEngineTests {
                     _ = try await engine.processAppStoreTransaction(
                         notifier: notifier,
                         order: Order(id: id, isSubscribed: false),
-                        orderId: id.uuidString,
                         transaction: active,
                         renewalInfo: renewing)
                 }
             }
             try await group.waitForAll()
         }
-        #expect(Set(store.updates.map(\.id)) == Set(ids))
-        #expect(store.updates.allSatisfy { $0.id == $0.order.id })
+        #expect(Set(store.updates.map(\.order.id)) == Set(ids))
+        #expect(store.updates.allSatisfy { $0.previous.id == $0.order.id })
     }
 
     @Test func clockIsReadPerCallNotAtInit() async throws {
@@ -604,7 +594,7 @@ struct AppStoreSignedDataEngineTests {
             yearlyProductID: "yearly", now: { clock.value })
         clock.value = now.addingTimeInterval(86_400 * 31)
         _ = try await engine.processAppStoreTransaction(
-            notifier: notifier, order: order(subscribed: true), orderId: orderID.uuidString,
+            notifier: notifier, order: order(subscribed: true),
             transaction: active, renewalInfo: renewing)
         #expect(store.updates.first?.order.isSubscribed == false)
     }

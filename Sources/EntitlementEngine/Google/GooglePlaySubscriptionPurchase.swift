@@ -94,8 +94,17 @@ public struct GooglePlaySubscriptionPurchase: Codable, Sendable, Equatable {
     }
 
     /// New purchases that are not acknowledged within three days are refunded by Google.
+    ///
+    /// `false` for a purchase that has not completed, which Google refuses to acknowledge, and
+    /// for one that has expired.
     public var needsAcknowledgement: Bool {
-        acknowledgementState == "ACKNOWLEDGEMENT_STATE_PENDING"
+        switch subscriptionState {
+        case "SUBSCRIPTION_STATE_PENDING", "SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED",
+             "SUBSCRIPTION_STATE_EXPIRED":
+            false
+        default:
+            acknowledgementState == "ACKNOWLEDGEMENT_STATE_PENDING"
+        }
     }
 
     public var isTestPurchase: Bool {

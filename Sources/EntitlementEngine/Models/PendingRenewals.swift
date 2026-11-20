@@ -7,7 +7,8 @@
 
 import Foundation
 
-public struct PendingRenewalInfo: Codable, Sendable {
+/// One entry of `pending_renewal_info` in a `verifyReceipt` response.
+public struct PendingRenewalInfo: Codable, Sendable, Equatable {
     
     public var autoRenewProductId: String
     public var originalTransactionId: String

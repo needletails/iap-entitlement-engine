@@ -16,12 +16,15 @@ let package = Package(
             targets: ["IAPEntitlementEngine"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/swift-server-community/APNSwift.git", .upToNextMajor(from: "8.0.0")),
+        .package(url: "https://github.com/kylebrowning/APNSwift.git", .upToNextMajor(from: "8.0.0")),
         .package(url: "https://github.com/apple/swift-crypto.git", .upToNextMajor(from: "5.0.3")),
         .package(url: "https://github.com/apple/swift-http-types.git", .upToNextMajor(from: "1.8.0")),
         .package(url: "https://github.com/apple/swift-nio.git", .upToNextMajor(from: "2.104.0")),
-        .package(url: "https://github.com/needletails/http-connection-kit.git", .upToNextMinor(from: "0.6.1")),
-        .package(url: "https://github.com/needle-tail/needletail-logger.git", .upToNextMajor(from: "3.2.1")),
+        // Pinned to the commit that fixes connections that take longer than 250 ms to open.
+        // Move to a version once that fix is tagged.
+        .package(
+            url: "https://github.com/needletails/http-connection-kit.git",
+            revision: "687b4742678b6750453b175af31abe1b5ea8cb3d"),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -33,8 +36,8 @@ let package = Package(
                 .product(name: "APNSCore", package: "APNSwift"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "HTTPConnectionKit", package: "http-connection-kit"),
-                .product(name: "NeedleTailLogger", package: "needletail-logger"),
-            ]
+            ],
+            path: "Sources/EntitlementEngine"
         ),
         .testTarget(
             name: "IAPEntitlementEngineTests",
@@ -46,6 +49,7 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
-            ]),
+            ],
+            path: "Tests/EntitlementEngineTests"),
     ]
 )

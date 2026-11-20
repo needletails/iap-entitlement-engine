@@ -40,8 +40,8 @@ DerivedData/
 *.mobileprovision
 *.provisionprofile
 secrets/
-*secret*
-credentials*
+*.secret
+credentials*.json
 *service-account*.json
 GoogleService-Info.plist
 google-services.json

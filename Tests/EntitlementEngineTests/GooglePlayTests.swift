@@ -29,7 +29,7 @@ private let googleExpiry = ISO8601DateFormatter().date(from: "2027-01-15T08:00:0
 @Suite("Google Play mapping")
 struct GooglePlayAdapterTests {
     func map(_ purchase: GooglePlaySubscriptionPurchase, isRevoked: Bool = false) throws -> SubscriptionSnapshot {
-        try GooglePlayAdapter.snapshot(purchase: purchase, catalog: catalog, isRevoked: isRevoked)
+        try GooglePlayAdapter.snapshot(purchase: purchase, catalog: catalog, held: nil, isRevoked: isRevoked, now: googleNow)
     }
 
     @Test func activeMapsWithFractionalSecondExpiry() throws {
@@ -87,6 +87,15 @@ struct GooglePlayAdapterTests {
     @Test func revokedRTDNWinsOverExpiredState() throws {
         let snapshot = try map(purchase(state: "SUBSCRIPTION_STATE_EXPIRED"), isRevoked: true)
         #expect(snapshot.lifecycle == .revoked(.other))
+    }
+
+    /// A revocation is the stronger statement, so it wins over the mark of a replaced purchase.
+    @Test func revocationWinsOverAReplacedPurchase() throws {
+        let replaced = try purchase(
+            state: "SUBSCRIPTION_STATE_EXPIRED",
+            extra: #""canceledStateContext":{"replacementCancellation":{}},"#)
+        #expect(try map(replaced).lifecycle == .pending)
+        #expect(try map(replaced, isRevoked: true).lifecycle == .revoked(.other))
     }
 
     @Test func pendingLeavesTheOrderAlone() throws {
@@ -218,6 +227,28 @@ struct GooglePlayAdapterTests {
         #expect(!test.needsAcknowledgement)
     }
 
+    /// Google refuses an acknowledgement for a purchase that has not completed, and one that
+    /// has expired no longer needs it.
+    @Test(arguments: [
+        "SUBSCRIPTION_STATE_PENDING", "SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED", "SUBSCRIPTION_STATE_EXPIRED",
+    ])
+    func purchaseThatCannotBeAcknowledgedIsNotFlagged(state: String) throws {
+        let json = #"{"subscriptionState":"\#(state)","acknowledgementState":"ACKNOWLEDGEMENT_STATE_PENDING"}"#
+        let purchase = try JSONDecoder().decode(GooglePlaySubscriptionPurchase.self, from: Data(json.utf8))
+        #expect(!purchase.needsAcknowledgement)
+    }
+
+    /// A subscriber who cancelled is leaving, even if a plan change was still waiting.
+    @Test func cancelledSubscriptionWithAWaitingPlanIsNotRenewing() throws {
+        let json = #"""
+        {"subscriptionState":"SUBSCRIPTION_STATE_CANCELED","lineItems":[
+          {"productId":"yearly","expiryTime":"2027-01-15T08:00:00Z","autoRenewingPlan":{"autoRenewEnabled":false}},
+          {"productId":"monthly","autoRenewingPlan":{"autoRenewEnabled":true}}]}
+        """#
+        let cancelled = try JSONDecoder().decode(GooglePlaySubscriptionPurchase.self, from: Data(json.utf8))
+        #expect(try map(cancelled).autoRenewEnabled == false)
+    }
+
     @Test func flagsUnacknowledgedPurchases() throws {
         let json = #"{"subscriptionState":"SUBSCRIPTION_STATE_ACTIVE","acknowledgementState":"ACKNOWLEDGEMENT_STATE_PENDING"}"#
         let pending = try JSONDecoder().decode(GooglePlaySubscriptionPurchase.self, from: Data(json.utf8))
@@ -239,7 +270,7 @@ struct GooglePlayEngineTests {
 
     @Test func newPurchaseGrantsAndNotifies() async throws {
         _ = try await engine.processGooglePlayPurchase(
-            notifier: notifier, order: Order(id: orderID, isSubscribed: false), orderId: orderID.uuidString,
+            notifier: notifier, order: Order(id: orderID, isSubscribed: false),
             purchase: purchase(state: "SUBSCRIPTION_STATE_ACTIVE"))
         #expect(store.updates.first?.order.isSubscribed == true)
         #expect(store.updates.first?.order.productName == "monthly")
@@ -250,7 +281,7 @@ struct GooglePlayEngineTests {
     @Test func accountHoldRevokesAccess() async throws {
         _ = try await engine.processGooglePlayPurchase(
             notifier: notifier, order: Order(id: orderID, productName: "monthly", isSubscribed: true),
-            orderId: orderID.uuidString, purchase: purchase(state: "SUBSCRIPTION_STATE_ON_HOLD"))
+            purchase: purchase(state: "SUBSCRIPTION_STATE_ON_HOLD"))
         #expect(store.updates.first?.order.isSubscribed == false)
         #expect(notifier.sent.first?.collapseID == "billing-issue")
     }
@@ -258,7 +289,7 @@ struct GooglePlayEngineTests {
     @Test func pendingCancellationDoesNotTouchTheStore() async throws {
         _ = try await engine.processGooglePlayPurchase(
             notifier: notifier, order: Order(id: orderID, productName: "monthly", isSubscribed: true),
-            orderId: orderID.uuidString, purchase: purchase(state: "SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED"))
+            purchase: purchase(state: "SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED"))
         #expect(store.updates.isEmpty)
         #expect(notifier.sent.isEmpty)
     }
@@ -268,7 +299,7 @@ struct GooglePlayEngineTests {
             GooglePlaySubscriptionPurchase.self, from: Data(GooglePlayAdapterTests.deferredReplacement.utf8))
         _ = try await engine.processGooglePlayPurchase(
             notifier: notifier, order: Order(id: orderID, productName: "yearly", isSubscribed: true),
-            orderId: orderID.uuidString, purchase: deferred)
+            purchase: deferred)
         #expect(store.updates.isEmpty)
         #expect(notifier.sent.isEmpty)
     }
@@ -276,7 +307,6 @@ struct GooglePlayEngineTests {
     @Test func anotherProductExpiringLeavesASubscriberAlone() async throws {
         _ = try await engine.processGooglePlayPurchase(
             notifier: notifier, order: Order(id: orderID, productName: "monthly", isSubscribed: true),
-            orderId: orderID.uuidString,
             purchase: purchase(state: "SUBSCRIPTION_STATE_EXPIRED", product: "other", basePlan: "other-plan"))
         #expect(store.updates.isEmpty)
         #expect(notifier.sent.isEmpty)
@@ -293,8 +323,8 @@ final class RecordingTransport: FCMTransport {
     private let calls_ = Mutex<[Call]>([])
     let response: FCMTransportResponse
 
-    init(status: Int = 200, body: String = #"{"name":"projects/p/messages/1"}"#) {
-        response = FCMTransportResponse(status: status, body: Data(body.utf8))
+    init(status: Int = 200, body: String = #"{"name":"projects/p/messages/1"}"#, headers: [String: String] = [:]) {
+        response = FCMTransportResponse(status: status, headers: headers, body: Data(body.utf8))
     }
 
     var calls: [Call] { calls_.withLock { $0 } }
@@ -329,7 +359,7 @@ struct FCMNotifierTests {
     @Test func postsToTheV1EndpointWithBearerAuth() async throws {
         let transport = RecordingTransport()
         try await notifier(transport).send(
-            IAPPayload(title: "T", subtitle: "S", body: "B"), collapseID: "c", expiresAt: expiry)
+            IAPPayload(title: "T", subtitle: "S", body: "B"), for: .cancelled, expiresAt: expiry)
         let call = try #require(transport.calls.first)
         #expect(call.url == "https://fcm.googleapis.com/v1/projects/my-project/messages:send")
         #expect(call.headers["Authorization"] == "Bearer secret-token")
@@ -339,7 +369,7 @@ struct FCMNotifierTests {
     @Test func foldsSubtitleIntoBodyBecauseFCMHasNoSubtitle() async throws {
         let transport = RecordingTransport()
         try await notifier(transport).send(
-            IAPPayload(title: "T", subtitle: "S", body: "B"), collapseID: "c", expiresAt: expiry)
+            IAPPayload(title: "T", subtitle: "S", body: "B"), for: .cancelled, expiresAt: expiry)
         let message = try sentMessage(transport)
         #expect(message["token"] as? String == "device-1")
         let notification = try #require(message["notification"] as? [String: String])
@@ -349,7 +379,7 @@ struct FCMNotifierTests {
     @Test func omitsEmptyPartsFromTheBody() async throws {
         let transport = RecordingTransport()
         try await notifier(transport).send(
-            IAPPayload(title: "T", subtitle: "S", body: ""), collapseID: "c", expiresAt: expiry)
+            IAPPayload(title: "T", subtitle: "S", body: ""), for: .cancelled, expiresAt: expiry)
         let notification = try #require(sentMessage(transport)["notification"] as? [String: String])
         #expect(notification["body"] == "S")
     }
@@ -359,7 +389,7 @@ struct FCMNotifierTests {
         let notifier = FCMEntitlementNotifier(
             projectID: "my-project", registrationToken: "device-1",
             accessTokenProvider: StaticToken(), transport: transport, now: { sendTime })
-        try await notifier.send(IAPPayload(title: "T", subtitle: "", body: ""), collapseID: "cancelled", expiresAt: expiry)
+        try await notifier.send(IAPPayload(title: "T", subtitle: "", body: ""), for: .cancelled, expiresAt: expiry)
         let android = try #require(sentMessage(transport)["android"] as? [String: Any])
         #expect(android["ttl"] as? String == "86400s")
         #expect(android["priority"] as? String == "HIGH")
@@ -370,7 +400,7 @@ struct FCMNotifierTests {
     @Test func repeatedMessageReplacesTheOneAlreadyOnScreen() async throws {
         let transport = RecordingTransport()
         try await notifier(transport).send(
-            IAPPayload(title: "T", subtitle: "", body: ""), collapseID: "billing-issue", expiresAt: expiry)
+            IAPPayload(title: "T", subtitle: "", body: ""), for: .billingIssue, expiresAt: expiry)
         let android = try #require(sentMessage(transport)["android"] as? [String: Any])
         #expect(android["notification"] as? [String: String] == ["tag": "billing-issue"])
     }
@@ -378,7 +408,7 @@ struct FCMNotifierTests {
     @Test func passesBinaryPayloadAsBase64Data() async throws {
         let transport = RecordingTransport()
         try await notifier(transport).send(
-            IAPPayload(title: "T", subtitle: "", body: "", data: Data([1, 2])), collapseID: "c", expiresAt: expiry)
+            IAPPayload(title: "T", subtitle: "", body: "", data: Data([1, 2])), for: .cancelled, expiresAt: expiry)
         let data = try #require(sentMessage(transport)["data"] as? [String: String])
         #expect(data == ["payload": "AQI="])
     }
@@ -390,15 +420,50 @@ struct FCMNotifierTests {
         """#)
         await #expect(throws: FCMError.unregistered) {
             try await notifier(transport).send(
-                IAPPayload(title: "T", subtitle: "", body: ""), collapseID: "c", expiresAt: expiry)
+                IAPPayload(title: "T", subtitle: "", body: ""), for: .cancelled, expiresAt: expiry)
         }
     }
 
     @Test func otherFailuresCarryTheStatus() async {
         let transport = RecordingTransport(status: 503, body: "nope")
-        await #expect(throws: FCMError.requestFailed(status: 503, body: "nope")) {
+        await #expect(throws: FCMError.requestFailed(status: 503, code: nil, retryAfter: nil, body: "nope")) {
             try await notifier(transport).send(
-                IAPPayload(title: "T", subtitle: "", body: ""), collapseID: "c", expiresAt: expiry)
+                IAPPayload(title: "T", subtitle: "", body: ""), for: .cancelled, expiresAt: expiry)
+        }
+    }
+
+    /// Google asks senders to back off on these, so the code and the wait must reach the caller.
+    @Test func failureCarriesFCMsErrorCodeAndRetryAfter() async {
+        let body = #"""
+        {"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[
+          {"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError","errorCode":"QUOTA_EXCEEDED"}]}}
+        """#
+        let transport = RecordingTransport(status: 429, body: body, headers: ["Retry-After": "30"])
+        await #expect(throws: FCMError.requestFailed(status: 429, code: "QUOTA_EXCEEDED", retryAfter: 30, body: body)) {
+            try await notifier(transport).send(
+                IAPPayload(title: "T", subtitle: "", body: ""), for: .cancelled, expiresAt: expiry)
+        }
+    }
+
+    /// A wait is whole seconds or an HTTP date. Anything else is not something to sleep for.
+    @Test(arguments: ["nan", "inf", "-5", "soon", ""])
+    func retryAfterThatIsNotAWaitIsNotReported(value: String) {
+        #expect(FCMEntitlementNotifier.wait(from: value, now: now) == nil)
+    }
+
+    @Test func retryAfterAcceptsSecondsAndADate() {
+        #expect(FCMEntitlementNotifier.wait(from: " 120 ", now: now) == 120)
+        // `now` is Fri, 15 Jan 2027 08:00:00 GMT.
+        #expect(FCMEntitlementNotifier.wait(from: "Fri, 15 Jan 2027 08:01:30 GMT", now: now) == 90)
+        #expect(FCMEntitlementNotifier.wait(from: "Fri, 15 Jan 2027 07:00:00 GMT", now: now) == 0)
+    }
+
+    @Test func failureFallsBackToTheStatusNameWhenThereIsNoFCMCode() async {
+        let body = #"{"error":{"code":503,"status":"UNAVAILABLE"}}"#
+        let transport = RecordingTransport(status: 503, body: body, headers: ["retry-after": "soon"])
+        await #expect(throws: FCMError.requestFailed(status: 503, code: "UNAVAILABLE", retryAfter: nil, body: body)) {
+            try await notifier(transport).send(
+                IAPPayload(title: "T", subtitle: "", body: ""), for: .cancelled, expiresAt: expiry)
         }
     }
 
@@ -406,7 +471,7 @@ struct FCMNotifierTests {
         let transport = RecordingTransport()
         let notifier = FCMEntitlementNotifier(
             projectID: "a/b", registrationToken: "t", accessTokenProvider: StaticToken(), transport: transport)
-        try await notifier.send(IAPPayload(title: "T", subtitle: "", body: ""), collapseID: "c", expiresAt: expiry)
+        try await notifier.send(IAPPayload(title: "T", subtitle: "", body: ""), for: .cancelled, expiresAt: expiry)
         #expect(transport.calls.first?.url == "https://fcm.googleapis.com/v1/projects/a%2Fb/messages:send")
     }
 }

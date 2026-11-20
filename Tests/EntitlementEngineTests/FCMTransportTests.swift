@@ -110,6 +110,7 @@ struct HTTPConnectionTransportTests {
 
         #expect(response.status == 201)
         #expect(response.body == Data("{}".utf8))
+        #expect(response.headers["content-length"] == "2")
         let wire = received.mutex.withLock { $0 }
         #expect(wire.method == "POST")
         #expect(wire.authorization == "Bearer t")
@@ -150,9 +151,82 @@ struct HTTPConnectionTransportTests {
     }
 
     @Test func invalidHeaderNameIsRejectedBeforeSending() async {
-        await #expect(throws: HTTPConnectionError.invalidRequest) {
+        await #expect(throws: PushTransportError.invalidRequest) {
             _ = try await HTTPConnectionFCMTransport().post(
                 url: "http://127.0.0.1:1/send", headers: ["bad name": "x"], body: Data())
         }
+    }
+
+    /// A caller reads these from `pushFailure`, so they must not need the transport's own types.
+    @Test func malformedURLIsRejectedWithThisPackagesError() async {
+        await #expect(throws: PushTransportError.invalidRequest) {
+            _ = try await HTTPConnectionFCMTransport().post(url: "", headers: [:], body: Data())
+        }
+    }
+
+    @Test func refusedConnectionIsReportedWithThisPackagesError() async {
+        do {
+            _ = try await HTTPConnectionFCMTransport(client: HTTPConnection(), timeout: .seconds(5)).post(
+                url: "http://127.0.0.1:1/send", headers: [:], body: Data())
+            Issue.record("a closed port answered")
+        } catch {
+            guard case PushTransportError.connection = error else {
+                Issue.record("unexpected error \(error)")
+                return
+            }
+        }
+    }
+
+    /// "Could not be built" must not be what a caller reads when the server simply hung up,
+    /// because that one says retrying will not help.
+    @Test func hangUpBeforeAnAnswerIsAConnectionFailure() async throws {
+        final class HangUp: ChannelInboundHandler, @unchecked Sendable {
+            typealias InboundIn = HTTPServerRequestPart
+            func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+                if case .end = unwrapInboundIn(data) { context.close(promise: nil) }
+            }
+        }
+        let server = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in
+                channel.pipeline.configureHTTPServerPipeline().flatMap { channel.pipeline.addHandler(HangUp()) }
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        let port = try #require(server.localAddress?.port)
+        let client = HTTPConnection()
+        let result = await Result(catching: {
+            try await HTTPConnectionFCMTransport(client: client, timeout: .seconds(5)).post(
+                url: "http://127.0.0.1:\(port)/send", headers: [:], body: Data("hello".utf8))
+        })
+        await client.shutdown()
+        try await server.close()
+        do {
+            _ = try result.get()
+            Issue.record("a server that hung up answered")
+        } catch {
+            guard case PushTransportError.connection = error else {
+                Issue.record("unexpected error \(error)")
+                return
+            }
+        }
+    }
+
+    /// A server that accepts the connection and never answers.
+    @Test func silentServerTimesOutWithThisPackagesError() async throws {
+        let server = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { $0.eventLoop.makeSucceededVoidFuture() }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        let port = try #require(server.localAddress?.port)
+        let client = HTTPConnection()
+        let result = await Result(catching: {
+            try await HTTPConnectionFCMTransport(client: client, timeout: .milliseconds(300)).post(
+                url: "http://127.0.0.1:\(port)/send", headers: [:], body: Data("hello".utf8))
+        })
+        await client.shutdown()
+        try await server.close()
+        #expect(throws: PushTransportError.timeout) { try result.get() }
     }
 }

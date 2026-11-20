@@ -10,8 +10,9 @@ import Foundation
 /// Decodes the payload JSON directly, or map them from `AppStoreServerLibrary`'s type of the same
 /// name. Dates are read as Apple's milliseconds whatever date strategy the decoder is set to.
 ///
-/// Decoding throws on JSON with no `productId`, which Apple always sends. A value with none means
-/// "no subscription", and that must never come from decoding the wrong JSON.
+/// Decoding throws on JSON with no `productId`, which Apple always sends. Only a value with
+/// nothing set means "no subscription". One with other fields but no product throws
+/// `missingProductID`, so that a lost product can never end a paid subscription.
 public struct AppStoreTransaction: Decodable, Sendable, Equatable {
     public var productId: String?
     public var originalTransactionId: String?
@@ -70,21 +71,25 @@ public struct AppStoreRenewalInfo: Decodable, Sendable, Equatable {
     public var autoRenewStatus: Int32?
     public var gracePeriodExpiresDate: Date?
     public var isInBillingRetryPeriod: Bool?
+    /// When the subscription's most recent purchase expires.
+    public var renewalDate: Date?
 
     public init(
         originalTransactionId: String? = nil,
         autoRenewStatus: Int32? = nil,
         gracePeriodExpiresDate: Date? = nil,
-        isInBillingRetryPeriod: Bool? = nil
+        isInBillingRetryPeriod: Bool? = nil,
+        renewalDate: Date? = nil
     ) {
         self.originalTransactionId = originalTransactionId
         self.autoRenewStatus = autoRenewStatus
         self.gracePeriodExpiresDate = gracePeriodExpiresDate
         self.isInBillingRetryPeriod = isInBillingRetryPeriod
+        self.renewalDate = renewalDate
     }
 
     private enum CodingKeys: String, CodingKey {
-        case originalTransactionId, autoRenewStatus, gracePeriodExpiresDate, isInBillingRetryPeriod
+        case originalTransactionId, autoRenewStatus, gracePeriodExpiresDate, isInBillingRetryPeriod, renewalDate
     }
 
     public init(from decoder: any Decoder) throws {
@@ -94,6 +99,7 @@ public struct AppStoreRenewalInfo: Decodable, Sendable, Equatable {
             autoRenewStatus: try container.decodeIfPresent(Int32.self, forKey: .autoRenewStatus),
             gracePeriodExpiresDate: try container.decodeIfPresent(Int64.self, forKey: .gracePeriodExpiresDate)
                 .map(Date.init(milliseconds:)),
-            isInBillingRetryPeriod: try container.decodeIfPresent(Bool.self, forKey: .isInBillingRetryPeriod))
+            isInBillingRetryPeriod: try container.decodeIfPresent(Bool.self, forKey: .isInBillingRetryPeriod),
+            renewalDate: try container.decodeIfPresent(Int64.self, forKey: .renewalDate).map(Date.init(milliseconds:)))
     }
 }

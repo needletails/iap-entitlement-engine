@@ -204,8 +204,6 @@ struct AppleEngineTests {
             weeklyProductID: "weekly",
             monthlyProductID: "monthly",
             yearlyProductID: "yearly",
-            apnTopic: "com.example.app",
-            deviceToken: "abcd",
             now: { now })
     }
 
@@ -215,26 +213,28 @@ struct AppleEngineTests {
 
     @Test func activeSubscriberIsNeverToldTheyCancelled() async throws {
         _ = try await engine().processReceipt(
-            apns: client, order: order(subscribed: true), orderId: orderID.uuidString,
+            notifier: device(client), order: order(subscribed: true),
             latestReceiptInfo: LatestReceiptInfo(productId: "monthly", expiresDateMs: future),
             pendingRenewalInfo: PendingRenewalInfo(autoRenewStatus: "1"))
         #expect(client.requests.isEmpty)
         #expect(store.updates.isEmpty)
     }
 
-    @Test func refundRevokesThenPushesToTheConfiguredDevice() async throws {
-        let status = try await engine().processReceipt(
-            apns: client, order: order(subscribed: true), orderId: orderID.uuidString,
+    @Test func refundRevokesThenPushesToTheDevice() async throws {
+        let result = try await engine().processReceipt(
+            notifier: device(client), order: order(subscribed: true),
             latestReceiptInfo: LatestReceiptInfo(
                 productId: "monthly", expiresDateMs: future,
                 cancellationDateMs: milliseconds(now.addingTimeInterval(-60)), cancellationReason: "0"),
             pendingRenewalInfo: PendingRenewalInfo())
 
-        #expect(status == .ok)
+        #expect(result.didSave)
+        #expect(result.order.isSubscribed == false)
+        #expect(result.notification == .cancelled)
         #expect(store.updates.count == 1)
         #expect(store.updates.first?.order.isSubscribed == false)
         #expect(store.updates.first?.order.updatedAt == now)
-        #expect(store.updates.first?.id == orderID)
+        #expect(store.updates.first?.order.id == orderID)
 
         let request = try #require(client.requests.first)
         #expect(request.deviceToken == "abcd")
@@ -246,7 +246,7 @@ struct AppleEngineTests {
     /// Regression: the push used a fixed 1970 expiry, so APNs treated it as already stale.
     @Test func pushExpiryIsInTheFuture() async throws {
         _ = try await engine().processReceipt(
-            apns: client, order: order(subscribed: false, product: nil), orderId: orderID.uuidString,
+            notifier: device(client), order: order(subscribed: false, product: nil),
             latestReceiptInfo: LatestReceiptInfo(productId: "monthly", expiresDateMs: future),
             pendingRenewalInfo: PendingRenewalInfo())
         #expect(client.requests.first?.expiration == Int(now.timeIntervalSince1970) + 86_400)
@@ -254,7 +254,7 @@ struct AppleEngineTests {
 
     @Test func pushDoesNotResetTheBadgeOrSendAnEmptyLaunchImage() async throws {
         _ = try await engine().processReceipt(
-            apns: client, order: order(subscribed: false, product: nil), orderId: orderID.uuidString,
+            notifier: device(client), order: order(subscribed: false, product: nil),
             latestReceiptInfo: LatestReceiptInfo(productId: "monthly", expiresDateMs: future),
             pendingRenewalInfo: PendingRenewalInfo())
         let json = try #require(client.requests.first?.json)
@@ -269,60 +269,40 @@ struct AppleEngineTests {
         let lapsed = LatestReceiptInfo(productId: "monthly", expiresDateMs: milliseconds(now.addingTimeInterval(-60)))
         let retrying = PendingRenewalInfo(autoRenewStatus: "1", isInBillingRetryPeriod: "1")
         _ = try await engine().processReceipt(
-            apns: client, order: order(subscribed: true), orderId: orderID.uuidString,
+            notifier: device(client), order: order(subscribed: true),
             latestReceiptInfo: lapsed, pendingRenewalInfo: retrying)
         #expect(store.updates.first?.order.isSubscribed == false)
         #expect(client.requests.map(\.collapseID) == ["billing-issue"])
 
         let saved = try #require(store.updates.first?.order)
         _ = try await engine().processReceipt(
-            apns: client, order: saved, orderId: orderID.uuidString,
+            notifier: device(client), order: saved,
             latestReceiptInfo: lapsed, pendingRenewalInfo: retrying)
         #expect(client.requests.count == 1)
     }
 
-    @Test func engineWithoutAPNsConfigurationThrowsBeforeSavingAnything() async {
-        let googleOnly = EntitlementEngine(
-            storeDelegate: store, weeklyProductID: "weekly", monthlyProductID: "monthly",
-            yearlyProductID: "yearly", now: { now })
-        await #expect(throws: EntitlementError.missingAPNsConfiguration) {
-            _ = try await googleOnly.processReceipt(
-                apns: client, order: order(subscribed: false, product: nil), orderId: orderID.uuidString,
-                latestReceiptInfo: LatestReceiptInfo(productId: "monthly", expiresDateMs: future),
-                pendingRenewalInfo: PendingRenewalInfo())
-        }
-        #expect(store.updates.isEmpty)
-    }
-
-    @Test func invalidOrderIDThrows() async {
-        await #expect(throws: EntitlementError.invalidOrderID) {
-            _ = try await engine().processReceipt(
-                apns: client, order: order(subscribed: true), orderId: "not-a-uuid",
-                latestReceiptInfo: LatestReceiptInfo(productId: "monthly", expiresDateMs: future),
-                pendingRenewalInfo: PendingRenewalInfo())
-        }
-    }
-
-    /// Regression: errors used to be logged and swallowed, returning `.ok`.
+    /// Regression: errors used to be logged and swallowed.
     @Test func storeFailurePropagatesAndNoPushIsSent() async {
         let failing = RecordingStore(failure: TestFailure.boom)
         await #expect(throws: TestFailure.boom) {
             _ = try await engine(store: failing).processReceipt(
-                apns: client, order: order(subscribed: false, product: nil), orderId: orderID.uuidString,
+                notifier: device(client), order: order(subscribed: false, product: nil),
                 latestReceiptInfo: LatestReceiptInfo(productId: "monthly", expiresDateMs: future),
                 pendingRenewalInfo: PendingRenewalInfo())
         }
         #expect(client.requests.isEmpty)
     }
 
-    @Test func pushFailurePropagatesAfterEntitlementIsSaved() async {
+    /// A throw means nothing was saved, so a failed push must come back in the result instead.
+    @Test func pushFailureIsReportedAfterTheEntitlementIsSaved() async throws {
         let failingClient = FakeAPNSClient(failure: TestFailure.boom)
-        await #expect(throws: TestFailure.boom) {
-            _ = try await engine().processReceipt(
-                apns: failingClient, order: order(subscribed: false, product: nil), orderId: orderID.uuidString,
-                latestReceiptInfo: LatestReceiptInfo(productId: "monthly", expiresDateMs: future),
-                pendingRenewalInfo: PendingRenewalInfo())
-        }
+        let result = try await engine().processReceipt(
+            notifier: device(failingClient), order: order(subscribed: false, product: nil),
+            latestReceiptInfo: LatestReceiptInfo(productId: "monthly", expiresDateMs: future),
+            pendingRenewalInfo: PendingRenewalInfo())
+        #expect(result.pushFailure as? TestFailure == .boom)
+        #expect(result.notification == .monthlyActive)
+        #expect(result.didSave)
         #expect(store.updates.count == 1)
     }
 
@@ -334,17 +314,16 @@ struct AppleEngineTests {
             for id in ids {
                 group.addTask { [client, future] in
                     _ = try await engine.processReceipt(
-                        apns: client,
+                        notifier: device(client),
                         order: Order(id: id, isSubscribed: false),
-                        orderId: id.uuidString,
                         latestReceiptInfo: LatestReceiptInfo(productId: "monthly", expiresDateMs: future),
                         pendingRenewalInfo: PendingRenewalInfo())
                 }
             }
             try await group.waitForAll()
         }
-        #expect(Set(store.updates.map(\.id)) == Set(ids))
-        #expect(store.updates.allSatisfy { $0.id == $0.order.id })
+        #expect(Set(store.updates.map(\.order.id)) == Set(ids))
+        #expect(store.updates.allSatisfy { $0.previous.id == $0.order.id })
     }
 
     /// One engine serves every user, so the destination has to travel with the call.
@@ -360,7 +339,6 @@ struct AppleEngineTests {
                         notifier: APNSEntitlementNotifier(
                             client: client, topic: "com.example.app", deviceToken: device.token),
                         order: Order(id: device.id, isSubscribed: false),
-                        orderId: device.id.uuidString,
                         latestReceiptInfo: LatestReceiptInfo(productId: "monthly", expiresDateMs: future),
                         pendingRenewalInfo: PendingRenewalInfo())
                 }
@@ -374,10 +352,10 @@ struct AppleEngineTests {
         let clock = TestClock(now)
         let engine = EntitlementEngine(
             storeDelegate: store, weeklyProductID: "weekly", monthlyProductID: "monthly",
-            yearlyProductID: "yearly", apnTopic: "t", deviceToken: "d", now: { clock.value })
+            yearlyProductID: "yearly", now: { clock.value })
         clock.value = now.addingTimeInterval(86_400 * 31)
         _ = try await engine.processReceipt(
-            apns: client, order: order(subscribed: true), orderId: orderID.uuidString,
+            notifier: device(client), order: order(subscribed: true),
             latestReceiptInfo: LatestReceiptInfo(productId: "monthly", expiresDateMs: future),
             pendingRenewalInfo: PendingRenewalInfo(autoRenewStatus: "1"))
         #expect(store.updates.first?.order.isSubscribed == false)

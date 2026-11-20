@@ -7,19 +7,26 @@ import APNSCore
 import Foundation
 
 /// Sends entitlement messages to one Apple device through APNs.
-public struct APNSEntitlementNotifier<Client: APNSClientProtocol>: EntitlementNotifier {
-    private let client: Client
+///
+/// The copy is sent twice: as the alert the system shows, and as `title`, `subtitle`, `body` and
+/// `data` at the root of the payload for the app to read. APNs allows 4 KB in all, which leaves
+/// about 2.7 KB for `data` with the default copy.
+public struct APNSEntitlementNotifier: EntitlementNotifier {
+    private let client: any APNSClientProtocol
     private let topic: String
     private let deviceToken: String
 
-    public init(client: Client, topic: String, deviceToken: String) {
+    /// - Parameters:
+    ///   - client: Create it once and reuse it. ``HTTPConnectionAPNSClient`` is the one included.
+    ///   - topic: The app's bundle ID.
+    public init(client: any APNSClientProtocol, topic: String, deviceToken: String) {
         self.client = client
         self.topic = topic
         self.deviceToken = deviceToken
     }
 
-    public func send(_ payload: IAPPayload, collapseID: String, expiresAt: Date) async throws {
-        var notification = APNSAlertNotification(
+    public func send(_ payload: IAPPayload, for notification: EntitlementNotification, expiresAt: Date) async throws {
+        var alert = APNSAlertNotification(
             alert: .init(
                 title: .raw(payload.title),
                 subtitle: payload.subtitle.isEmpty ? nil : .raw(payload.subtitle),
@@ -29,7 +36,7 @@ public struct APNSEntitlementNotifier<Client: APNSClientProtocol>: EntitlementNo
             topic: topic,
             payload: payload,
             sound: .default)
-        notification.collapseID = collapseID
-        try await client.sendAlertNotification(notification, deviceToken: deviceToken)
+        alert.collapseID = notification.collapseID
+        try await client.sendAlertNotification(alert, deviceToken: deviceToken)
     }
 }

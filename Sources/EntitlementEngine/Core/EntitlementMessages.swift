@@ -4,6 +4,9 @@
 //
 
 /// The user-facing events the engine can announce.
+///
+/// A later release can add cases, so end a `switch` over it with `@unknown default`.
+@nonexhaustive
 public enum EntitlementNotification: String, Sendable, CaseIterable {
     case upgraded
     case billingIssue = "billing-issue"
@@ -18,7 +21,8 @@ public enum EntitlementNotification: String, Sendable, CaseIterable {
     case notSubscribed = "not-subscribed"
 
     /// Lets the device replace an earlier copy of the same message, so a repeat does not stack up.
-    var collapseID: String { rawValue }
+    /// The value is the raw value, and it will not change for an existing case.
+    public var collapseID: String { rawValue }
 }
 
 /// The copy for every notification. Override any of it to match your app or to localize.
@@ -72,7 +76,8 @@ public struct EntitlementMessages: Sendable, Equatable {
 
     public init() {}
 
-    func payload(for notification: EntitlementNotification) -> IAPPayload {
+    /// The copy for one notification. Use it to resend a push that failed.
+    public func payload(for notification: EntitlementNotification) -> IAPPayload {
         switch notification {
         case .upgraded: upgraded
         case .billingIssue: billingIssue

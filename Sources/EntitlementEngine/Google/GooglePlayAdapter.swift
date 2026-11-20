@@ -13,15 +13,22 @@ enum GooglePlayAdapter {
     static func snapshot(
         purchase: GooglePlaySubscriptionPurchase,
         catalog: ProductCatalog,
-        isRevoked: Bool
+        held: String?,
+        isRevoked: Bool,
+        now: Date
     ) throws -> SubscriptionSnapshot {
-        let lifecycle = try lifecycle(of: purchase, isRevoked: isRevoked)
+        var lifecycle = try lifecycle(of: purchase, isRevoked: isRevoked)
         let needsExpiry = lifecycle == .active || lifecycle == .gracePeriod
         let items = purchase.lineItems ?? []
         // A line item with no expiry has not started yet, as with a deferred plan change, so it
         // cannot be what the customer holds now.
         let started = needsExpiry ? items.filter { $0.expiryTime != nil } : items
-        let matching = started.filter { catalog.contains(identifier(of: $0, catalog: catalog)) }
+        // The plan the order holds counts even after it has left the catalog, so that its expiry
+        // or refund is read from its own line item.
+        let matching = started.filter {
+            let id = identifier(of: $0, catalog: catalog, held: held)
+            return catalog.contains(id) || (!id.isEmpty && id == held)
+        }
         let candidates = matching.isEmpty ? started : matching
 
         let dated = try candidates.map { item -> (item: GooglePlaySubscriptionPurchase.LineItem, expiry: Date?) in
@@ -36,10 +43,19 @@ enum GooglePlayAdapter {
         if needsExpiry, latest == nil {
             throw EntitlementError.invalidDate(field: "expiryTime")
         }
-        // The subscription carries on under the plan that is waiting to start.
+        // The subscription carries on under the plan that is waiting to start, unless the
+        // subscriber has cancelled.
         let continuesOnANewPlan = started.count < items.count
+            && purchase.subscriptionState != "SUBSCRIPTION_STATE_CANCELED"
+        // Play keeps a renewing subscription ACTIVE while it collects the payment, with an
+        // expiryTime that is already behind. Only Play's next state says how that ends.
+        if lifecycle == .active, purchase.subscriptionState == "SUBSCRIPTION_STATE_ACTIVE",
+           continuesOnANewPlan || latest?.item.autoRenewingPlan?.autoRenewEnabled == true,
+           let expiry = latest?.expiry, expiry <= now {
+            lifecycle = .pending
+        }
         return SubscriptionSnapshot(
-            productID: latest.map { identifier(of: $0.item, catalog: catalog) } ?? "",
+            productID: latest.map { identifier(of: $0.item, catalog: catalog, held: held) } ?? "",
             lifecycle: lifecycle,
             expiresAt: latest?.expiry,
             autoRenewEnabled: continuesOnANewPlan || (latest?.item.autoRenewingPlan?.autoRenewEnabled ?? false),
@@ -78,9 +94,16 @@ enum GooglePlayAdapter {
     /// Play usually sells one product with several base plans, so a base plan can be the catalog entry.
     private static func identifier(
         of item: GooglePlaySubscriptionPurchase.LineItem,
-        catalog: ProductCatalog
+        catalog: ProductCatalog,
+        held: String?
     ) -> String {
-        if let basePlan = item.offerDetails?.basePlanId, catalog.contains(basePlan) {
+        let basePlan = item.offerDetails?.basePlanId
+        if let basePlan, catalog.contains(basePlan) {
+            return basePlan
+        }
+        // A base plan retired from the catalog still names the subscription of the order that
+        // holds it. The catalog always wins, and an empty name never matches.
+        if !catalog.contains(item.productId), let basePlan, !basePlan.isEmpty, basePlan == held {
             return basePlan
         }
         return item.productId

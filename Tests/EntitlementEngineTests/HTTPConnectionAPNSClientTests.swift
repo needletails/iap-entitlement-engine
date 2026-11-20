@@ -225,6 +225,7 @@ struct HTTPConnectionAPNSClientTests {
         #expect(error.responseStatus == 400)
         #expect(error.reason?.reason == "BadDeviceToken")
         #expect(error.apnsID == Self.apnsID)
+        #expect(error.apnsUniqueID == nil)
     }
 
     /// `410` is how a server learns to stop using a token.
@@ -234,6 +235,19 @@ struct HTTPConnectionAPNSClientTests {
         #expect(error.responseStatus == 410)
         #expect(error.reason?.reason == "Unregistered")
         #expect(error.timestamp == now)
+    }
+
+    @Test func rejectionCarriesTheUniqueIDAPNsSendsInDevelopment() async throws {
+        let unique = UUID()
+        let error = try await failure(
+            status: .badRequest, headers: ["apns-unique-id": unique.uuidString], body: #"{"reason":"BadTopic"}"#)
+        #expect(error.apnsUniqueID == unique)
+    }
+
+    /// APNs answers are tiny, so a huge one is refused rather than buffered.
+    @Test func oversizedAnswerIsRefusedByTheShippedLimit() {
+        #expect(HTTPConnectionAPNSClient.configuration.maximumBufferedBodySize == 1 << 16)
+        #expect(HTTPConnectionFCMTransport.configuration.maximumBufferedBodySize == 1 << 20)
     }
 
     @Test func unreadableErrorBodyStillThrowsAPNSError() async throws {
@@ -248,10 +262,59 @@ struct HTTPConnectionAPNSClientTests {
         #expect(error.reason == nil)
     }
 
-    @Test func defaultConnectionPrefersHTTP3AndNeverFollowsRedirects() {
-        #expect(HTTPConnectionAPNSClient.configuration.protocols == .default)
-        #expect(HTTPConnectionAPNSClient.configuration.protocols == .prefer(.http3, fallback: [.http2, .http1_1]))
+    /// APNs only speaks HTTP/2. Trying QUIC first hid a failed connection behind a 30 second wait.
+    @Test func apnsConnectionSpeaksOnlyHTTP2AndNeverFollowsRedirects() {
+        #expect(HTTPConnectionAPNSClient.configuration.protocols == .require(.http2))
         #expect(HTTPConnectionAPNSClient.configuration.redirects == .disabled)
+    }
+
+    /// FCM does answer HTTP/3, so it keeps the downgrade path.
+    @Test func fcmConnectionPrefersHTTP3AndNeverFollowsRedirects() {
+        #expect(HTTPConnectionFCMTransport.configuration.protocols == .prefer(.http3, fallback: [.http2, .http1_1]))
+        #expect(HTTPConnectionFCMTransport.configuration.redirects == .disabled)
+    }
+
+    /// A gateway that forgets an idle flow resets the next push on it, and one-off pushes are
+    /// never resent. Retiring idle connections first avoids that.
+    @Test func idleConnectionsAreRetiredBeforeAGatewayForgetsThem() throws {
+        for configuration in [HTTPConnectionAPNSClient.configuration, HTTPConnectionFCMTransport.configuration] {
+            let idle = try #require(configuration.pool.idleTimeout)
+            #expect(idle > .seconds(30))
+            #expect(idle < .seconds(240))
+        }
+    }
+
+    @Test func clientOwnsOnlyTheConnectionItCreated() {
+        let own = HTTPConnectionAPNSClient(
+            environment: .development, privateKey: key, keyIdentifier: "KEY123", teamIdentifier: "TEAM456")
+        #expect(own.ownsClient)
+        let injected = HTTPConnectionAPNSClient(
+            environment: .development, privateKey: key, keyIdentifier: "KEY123", teamIdentifier: "TEAM456",
+            client: HTTPConnection())
+        #expect(!injected.ownsClient)
+    }
+
+    /// Escaped slashes double every "/" of a base64 payload and can push a body over 4 KB.
+    @Test func payloadDataIsSentWithoutEscapedSlashes() async throws {
+        let slashes = Data(repeating: 0xFF, count: 30)
+        #expect(slashes.base64EncodedString().contains("/"))
+        let request = APNSRequest(
+            message: APNSAlertNotification(
+                alert: .init(title: .raw("Hello")),
+                expiration: .immediately,
+                priority: .immediately,
+                topic: "com.example.app",
+                payload: IAPPayload(title: "Hello", subtitle: "", body: "", data: slashes)),
+            deviceToken: "abcd",
+            pushType: .alert,
+            expiration: .immediately,
+            priority: .immediately,
+            apnsID: Self.apnsID,
+            topic: "com.example.app",
+            collapseID: "cancelled")
+        _ = try await withClient { try await $0.send(request) }
+        let body = String(decoding: try #require(record.requests.first?.body), as: UTF8.self)
+        #expect(body.contains(slashes.base64EncodedString()))
     }
 
     /// An invalid configuration only fails on the first send, so catch it here.
@@ -265,23 +328,20 @@ struct HTTPConnectionAPNSClientTests {
         _ = try await withClient { client in
             let engine = EntitlementEngine(
                 storeDelegate: store, weeklyProductID: "weekly", monthlyProductID: "monthly",
-                yearlyProductID: "yearly", apnTopic: "com.example.app", deviceToken: "abcd", now: { now })
+                yearlyProductID: "yearly", now: { now })
             return try await engine.processReceipt(
-                apns: client, order: Order(id: orderID, isSubscribed: false), orderId: orderID.uuidString,
+                notifier: APNSEntitlementNotifier(client: client, topic: "com.example.app", deviceToken: "abcd"),
+                order: Order(id: orderID, isSubscribed: false),
                 latestReceiptInfo: LatestReceiptInfo(
                     productId: "monthly", expiresDateMs: milliseconds(now.addingTimeInterval(86_400))),
                 pendingRenewalInfo: PendingRenewalInfo(autoRenewStatus: "1"))
         }
         #expect(store.updates.count == 1)
-        #expect(record.requests.first?.headers["apns-collapse-id"] == "monthly-active")
+        let headers = try #require(record.requests.first?.headers)
+        #expect(headers["apns-collapse-id"] == "monthly-active")
+        #expect(headers["apns-priority"] == "10")
+        #expect(headers["apns-push-type"] == "alert")
+        #expect(headers["apns-topic"] == "com.example.app")
     }
 
-    /// The caller owns an injected connection, so closing the client must leave it usable.
-    @Test func shutdownLeavesAnInjectedConnectionOpen() async throws {
-        _ = try await withClient { client in
-            try await client.shutdown()
-            return try await client.send(request())
-        }
-        #expect(record.requests.count == 1)
-    }
 }
