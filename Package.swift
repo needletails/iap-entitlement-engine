@@ -24,7 +24,7 @@ let package = Package(
         // Move to a version once that fix is tagged.
         .package(
             url: "https://github.com/needletails/http-connection-kit.git",
-            revision: "687b4742678b6750453b175af31abe1b5ea8cb3d"),
+            revision: "602e6c211fa45573433e75042d96d00bf6d44580"),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
