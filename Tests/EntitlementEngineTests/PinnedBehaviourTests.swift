@@ -94,6 +94,11 @@ struct PinnedBehaviourTests {
         messages.cancelledAppIssue = IAPPayload(
             title: "cancelled-app-issue", subtitle: "s-cancelled-app-issue", body: "b-cancelled-app-issue")
         messages.notSubscribed = IAPPayload(title: "not-subscribed", subtitle: "s-not-subscribed", body: "b-not-subscribed")
+        messages.purchased = IAPPayload(title: "purchased", subtitle: "s-purchased", body: "b-purchased")
+        messages.purchaseRefunded = IAPPayload(
+            title: "purchase-refunded", subtitle: "s-purchase-refunded", body: "b-purchase-refunded")
+        messages.purchaseReinstated = IAPPayload(
+            title: "purchase-reinstated", subtitle: "s-purchase-reinstated", body: "b-purchase-reinstated")
 
         // Every notification maps to its own copy.
         for notification in EntitlementNotification.allCases {

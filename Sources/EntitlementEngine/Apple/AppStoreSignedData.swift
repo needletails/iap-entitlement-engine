@@ -22,6 +22,27 @@ public struct AppStoreTransaction: Decodable, Sendable, Equatable {
     public var revocationReason: Int32?
     public var offerType: Int32?
     public var offerDiscountType: String?
+    /// Unique for each transaction. A one-time purchase is recorded under its original
+    /// transaction ID, which is this value for the purchase itself.
+    public var transactionId: String?
+    /// Apple's name for the kind of product, such as `Consumable`.
+    public var type: String?
+    /// How many units of a consumable were bought.
+    public var quantity: Int32?
+    public var purchaseDate: Date?
+    /// The UUID your app attached to the purchase to say whose it is.
+    public var appAccountToken: String?
+    /// `PURCHASED`, or `FAMILY_SHARED` for a purchase shared with the buyer's family.
+    public var inAppOwnershipType: String?
+    /// `Production`, or `Sandbox`, `Xcode` or `LocalTesting` for a test purchase.
+    public var environment: String?
+    /// Why access was revoked: `REFUND_FULL`, `REFUND_PRORATED`, `FAMILY_REVOKE` or
+    /// `ASSIGNMENT_REVOKE`.
+    public var revocationType: String?
+    /// How much of a prorated refund was refunded, in thousandths of a percent.
+    public var revocationPercentage: Int64?
+    /// When Apple signed this transaction.
+    public var signedDate: Date?
 
     public init(
         productId: String? = nil,
@@ -31,7 +52,17 @@ public struct AppStoreTransaction: Decodable, Sendable, Equatable {
         revocationDate: Date? = nil,
         revocationReason: Int32? = nil,
         offerType: Int32? = nil,
-        offerDiscountType: String? = nil
+        offerDiscountType: String? = nil,
+        transactionId: String? = nil,
+        type: String? = nil,
+        quantity: Int32? = nil,
+        purchaseDate: Date? = nil,
+        appAccountToken: String? = nil,
+        inAppOwnershipType: String? = nil,
+        environment: String? = nil,
+        revocationType: String? = nil,
+        revocationPercentage: Int64? = nil,
+        signedDate: Date? = nil
     ) {
         self.productId = productId
         self.originalTransactionId = originalTransactionId
@@ -41,11 +72,23 @@ public struct AppStoreTransaction: Decodable, Sendable, Equatable {
         self.revocationReason = revocationReason
         self.offerType = offerType
         self.offerDiscountType = offerDiscountType
+        self.transactionId = transactionId
+        self.type = type
+        self.quantity = quantity
+        self.purchaseDate = purchaseDate
+        self.appAccountToken = appAccountToken
+        self.inAppOwnershipType = inAppOwnershipType
+        self.environment = environment
+        self.revocationType = revocationType
+        self.revocationPercentage = revocationPercentage
+        self.signedDate = signedDate
     }
 
     private enum CodingKeys: String, CodingKey {
         case productId, originalTransactionId, expiresDate, isUpgraded
         case revocationDate, revocationReason, offerType, offerDiscountType
+        case transactionId, type, quantity, purchaseDate, appAccountToken, inAppOwnershipType, environment
+        case revocationType, revocationPercentage, signedDate
     }
 
     public init(from decoder: any Decoder) throws {
@@ -58,7 +101,19 @@ public struct AppStoreTransaction: Decodable, Sendable, Equatable {
             revocationDate: try container.decodeIfPresent(Int64.self, forKey: .revocationDate).map(Date.init(milliseconds:)),
             revocationReason: try container.decodeIfPresent(Int32.self, forKey: .revocationReason),
             offerType: try container.decodeIfPresent(Int32.self, forKey: .offerType),
-            offerDiscountType: try container.decodeIfPresent(String.self, forKey: .offerDiscountType))
+            offerDiscountType: try container.decodeIfPresent(String.self, forKey: .offerDiscountType),
+            // Subscriptions never read the fields below, so one that has an unexpected shape
+            // is left out rather than failing a subscription event.
+            transactionId: try? container.decodeIfPresent(String.self, forKey: .transactionId),
+            type: try? container.decodeIfPresent(String.self, forKey: .type),
+            quantity: try? container.decodeIfPresent(Int32.self, forKey: .quantity),
+            purchaseDate: (try? container.decodeIfPresent(Int64.self, forKey: .purchaseDate)).map(Date.init(milliseconds:)),
+            appAccountToken: try? container.decodeIfPresent(String.self, forKey: .appAccountToken),
+            inAppOwnershipType: try? container.decodeIfPresent(String.self, forKey: .inAppOwnershipType),
+            environment: try? container.decodeIfPresent(String.self, forKey: .environment),
+            revocationType: try? container.decodeIfPresent(String.self, forKey: .revocationType),
+            revocationPercentage: try? container.decodeIfPresent(Int64.self, forKey: .revocationPercentage),
+            signedDate: (try? container.decodeIfPresent(Int64.self, forKey: .signedDate)).map(Date.init(milliseconds:)))
     }
 }
 

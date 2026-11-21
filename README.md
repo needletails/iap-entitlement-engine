@@ -6,13 +6,15 @@
 
 ## Overview
 
-A server-side Swift package that turns verified App Store and Google Play subscription data into an up-to-date `Order` and a push notification. Both stores run through the same entitlement rules.
+A server-side Swift package that turns verified App Store and Google Play purchase data into saved state and a push notification. `EntitlementEngine` keeps an `Order` up to date for subscriptions that renew. `PurchaseEngine` records one-time purchases and makes sure each is granted once. Both stores run through the same rules.
 
 The engine trusts its inputs. It does not fetch or verify purchases, so verify them with Apple or Google first.
 
 ## Features
 
 - Auto-renewable subscriptions on the App Store and Google Play
+- One-time purchases on both stores: consumables, non-consumables and non-renewing purchases
+- Each purchase granted once and each refund taken back once, however often the store sends it
 - Weekly, monthly and yearly plans
 - Trials, introductory offers, grace periods, account hold, pause, refunds and upgrades
 - Push notifications through APNs and Firebase Cloud Messaging (FCM)
@@ -216,6 +218,113 @@ Your server has to handle these parts itself:
 - **Base plan IDs:** a base plan ID matches under any Play product, so keep the three you use, and any you list in `retiredProductIDs`, unique across the app's subscription products.
 - **Test purchases:** `purchase.isTestPurchase` is exposed so you can decide how to treat them.
 
+## One-time purchases
+
+`PurchaseEngine` handles products bought with a single payment. List the ones you sell, and say what kind each is:
+
+```swift
+let purchases = PurchaseEngine(
+    storeDelegate: myPurchaseStore,
+    products: [
+        OneTimeProduct(id: "com.example.coins.100", kind: .consumable),
+        OneTimeProduct(id: "com.example.pro", kind: .nonConsumable),
+        OneTimeProduct(id: "com.example.season", kind: .nonRenewing(duration: 90 * 86_400)),
+    ]
+)
+```
+
+### Your purchase store
+
+Your `PurchaseStoreDelegate` reads and saves a `PurchaseRecord` for each purchase, and applies each change to what the buyer holds:
+
+```swift
+func savePurchase(
+    _ record: PurchaseRecord, replacing previous: PurchaseRecord?, quantityChange: Int
+) async throws {
+    try await database.transaction { db in
+        if let previous {
+            // Throws unless a row with this revision is still there.
+            try await db.updatePurchase(record, whereRevision: previous.revision)
+        } else {
+            // Throws if this store's transaction ID already exists.
+            try await db.insertPurchase(record)
+        }
+        try await db.addToBalance(quantityChange, of: record.productID, account: record.accountID)
+    }
+}
+```
+
+Four rules keep the count right:
+
+- **Apply the change in the same database transaction as the record.** The engine reports each change once. If the record is saved and the balance is updated afterwards, a crash in between loses a paid purchase or keeps a refunded one.
+- **Make both writes conditional, and throw when the condition fails.** Insert a new record only if none exists for that store and transaction ID, and update one only where the stored `revision` is the one the engine read. Two events for one purchase can arrive together: without the first check a purchase can be granted twice, and without the second a refund can be taken back twice. When you throw, the engine rethrows. Answer the store's webhook with an error then, so that it sends the event again: a non-2xx status to Apple, or no acknowledgement to Pub/Sub. A call that came from your own app is not retried for you, so retry it once yourself.
+- **Expect saves that change no balance.** `quantityChange` is zero when only the record's bookkeeping changed, such as a refund reversal that arrived before its refund.
+- **Keep records after a refund.** The record is what stops a second grant.
+
+### App Store
+
+```swift
+switch notificationType {
+case .refundReversed:
+    result = try await purchases.processAppStoreRefundReversal(
+        notifier: notifier, transaction: transaction, signedDate: notification.signedDate)
+default:  // ONE_TIME_CHARGE, REFUND, REVOKE, or a transaction your app sent
+    result = try await purchases.processAppStoreTransaction(notifier: notifier, transaction: transaction)
+}
+```
+
+- **Whose purchase.** Set `appAccountToken` on the purchase in your app, or pass `accountID`. A purchase that names nobody throws `missingAccountID` and saves nothing, so a webhook that arrives before your app's own call is retried by Apple, and the purchase is granted once one of them names the buyer. An `unchanged` result can be someone else's purchase sent again, so compare `result.record?.accountID` with the caller before you unlock anything on it.
+- **Refunds.** Pass the transaction from a `REFUND` or `REVOKE` notification. Apple sets `revocationDate` on it, and the engine reads that.
+- **Prorated refunds.** For `REFUND_PRORATED`, the engine takes back the refunded share of a consumable, rounded to whole units: one of three for a third of the price. A single unit goes at half the price or more. A non-consumable or non-renewing purchase cannot be split, so it stays until a full refund. A prorated refund with no `revocationPercentage` throws `unsupportedState`.
+- **A second refund.** Apple can refund again after a reversal. The newest refund that is not reversed decides how much is taken back, so a newer refund that takes back less returns the difference, with the outcome `reinstated`.
+- **Reversed refunds.** Call `processAppStoreRefundReversal` for `REFUND_REVERSED`, and only for it. That transaction looks like the original purchase, so nothing else can tell a reversal from an old copy of the purchase.
+- **Events out of order.** Apple's notifications can overtake each other. A reversal undoes every refund dated before its `signedDate` and none dated after, in whatever order they arrive. One that arrives before its refund is remembered.
+- **Which ID.** A record is stored under the original transaction ID, so a restored copy with a new transaction ID is the same purchase.
+- **Family Sharing.** A shared non-consumable is recorded like any other, with `isFamilyShared` set. Apple's documentation does not say whether a family member's copy has its own original transaction ID. If it ever arrives under the buyer's ID, the engine throws `transactionMismatch` and leaves the buyer's purchase alone. Check this with a sandbox family before you sell a shareable product.
+
+### Google Play
+
+```swift
+let result = try await purchases.processGooglePlayPurchase(
+    notifier: notifier,
+    productID: productID,
+    purchaseToken: purchaseToken,
+    purchase: try JSONDecoder().decode(GooglePlayProductPurchase.self, from: response),
+    voided: voided
+)
+```
+
+- **What to fetch.** Call `purchases.products.get` with the product ID and purchase token, and pass a response you have just fetched.
+- **Whose purchase.** Set `obfuscatedExternalAccountId` on the purchase in your app, or pass `accountID`. The rules are the same as for the App Store.
+- **Voided purchases.** Google takes an item back by voiding it, and reports that through `VoidedPurchaseNotification` and the Voided Purchases API. Pass `.full` when `refundType` is 1 and `.partial` when it is 2. For a partial void the engine reads how many units are left from the `refundableQuantity` of the purchase you just fetched. A refund that Google does not report as voided leaves the item with the buyer, so without `voided` the engine does not act on `refundableQuantity`.
+- **Finding the product.** A void notification carries the purchase token and no product ID. Read the product ID from the record you saved under the token, then fetch the purchase.
+- **Pending purchases.** A pending purchase grants nothing and saves nothing. Google reports again when it is paid.
+- **Acknowledgement and consumption.** Acknowledge when `purchase.needsAcknowledgement` is `true` and `result.record?.isRevoked == false`. Consume a consumable after it is granted, so it can be bought again. Google refunds a purchase that is not acknowledged within three days.
+- **Test purchases.** They are granted like any other, and the record has `isTest` set.
+
+### What comes back
+
+| Outcome | Meaning | `quantityChange` |
+| --- | --- | --- |
+| `granted` | A purchase the engine had not seen | The units bought. Always 1 unless the product is consumable. |
+| `revoked` | A refund or void the engine had not seen | Negative: the units taken back. Zero if the purchase was never granted. |
+| `reinstated` | Apple reversed a refund, or replaced it with a smaller one | The units given back |
+| `unchanged` | Seen before | 0 |
+| `pending` | Google has not been paid yet. Nothing is saved. | 0 |
+| `ignored` | Not one of your one-time products. Nothing is saved. | 0 |
+
+Your delegate has already applied `quantityChange` by the time you get the result, so do not apply it again.
+
+### Limits
+
+- **Refund before purchase.** If the refund arrives first, it is recorded, and the purchase that follows grants nothing.
+- **More than one unit of a non-consumable.** The record holds one unit whatever quantity the store shows, and keeps it until every paid unit is voided.
+- **Non-renewing purchases.** Neither store reports when one ends, so the record's `expiresAt` is the purchase date plus the duration you gave, in seconds. Check `record.isActive(at:)` when you decide access. No event arrives at the end. Time spent refunded is not added back after a reversal, and two purchases do not stack.
+- **A refund after a partial void on Google.** If Google refunds units without voiding them and later voids others, `refundableQuantity` counts both, and the engine takes back both.
+- **Not checked against a live store.** The rules follow Apple's and Google's documentation. Before launch, run a purchase, a refund and a refund reversal through the sandbox, and confirm that a `REFUND_REVERSED` transaction arrives without `revocationDate`.
+- **Same message twice.** Two purchases made close together send the same notification, so the second replaces the first on the device.
+- **Google's newer API.** The engine reads the response of `purchases.products.get`. It does not read `purchases.productsv2`.
+
 ## Behavior
 
 | Situation | Access | Push |
@@ -236,7 +345,7 @@ Your server has to handle these parts itself:
 | Pending or replaced (Google) | Unchanged | None |
 | A product outside your three | Unchanged | None |
 
-Events for other products are safe to pass in. A refunded consumable, a one-time purchase or another subscription lapsing leaves the order alone.
+Events for other products are safe to pass in. A refunded consumable, a one-time purchase or another subscription lapsing leaves the order alone. One-time purchases go to `PurchaseEngine`.
 
 A product you have retired keeps the subscriber who is already on it. Their renewals keep access, and their expiry or refund ends it. It never starts a subscription for an order that does not hold it.
 
@@ -262,9 +371,12 @@ A process call throws before anything is saved, or rethrows what your delegate t
 | --- | --- | --- |
 | `invalidDate(field:)` | A date the decision depends on is missing or malformed | Check how the payload was decoded or mapped |
 | `transactionMismatch` | The transaction and its renewal info name different subscriptions | Pass the renewal info that came with that transaction |
+| `transactionMismatch` from `PurchaseEngine` | A one-time purchase arrived under the ID of a record for another product, or a Family Sharing copy under the ID of a paid purchase | Do not retry. Check how the transaction was mapped |
+| `missingTransactionID` | A one-time purchase has no transaction ID or purchase token | Fix the mapping |
+| `missingAccountID` | A one-time purchase names nobody to give it to | Set the account token in your app, or pass `accountID`. Let the store retry the webhook |
 | `missingRenewalInfo` | A lapsed Apple period arrived with empty renewal info | Pass the renewal info Apple returned. For a receipt with no entry, see [Receipts](#receipts) |
 | `missingProductID` | An Apple transaction or receipt row has fields but no product | Fix the mapping. Pass the empty value only when Apple returned none |
-| `unsupportedState(_:)` | Google returned a subscription state this version does not know | Update the package |
+| `unsupportedState(_:)` | Google returned a state this version does not know, or Apple sent a prorated refund with no percentage | Update the package |
 | Your delegate's error | The save failed | Retry the event |
 
 Decoding `AppStoreTransaction` or `AppStoreRenewalInfo` throws a `DecodingError` on malformed JSON, before the engine is involved.

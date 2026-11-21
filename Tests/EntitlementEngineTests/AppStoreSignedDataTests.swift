@@ -344,7 +344,14 @@ struct AppStoreSignedDataDecodingTests {
             revocationDate: Date(milliseconds: 1_799_000_000_456),
             revocationReason: 1,
             offerType: 1,
-            offerDiscountType: "FREE_TRIAL"))
+            offerDiscountType: "FREE_TRIAL",
+            transactionId: "23456",
+            type: "Auto-Renewable Subscription",
+            quantity: 1,
+            purchaseDate: Date(milliseconds: 1_798_148_900_000),
+            inAppOwnershipType: "PURCHASED",
+            environment: "LocalTesting",
+            signedDate: Date(milliseconds: 1_798_148_900_000)))
     }
 
     @Test func decodesARealRenewalShape() throws {

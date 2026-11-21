@@ -19,6 +19,9 @@ public enum EntitlementNotification: String, Sendable, CaseIterable {
     case cancelled
     case cancelledAppIssue = "cancelled-app-issue"
     case notSubscribed = "not-subscribed"
+    case purchased
+    case purchaseRefunded = "purchase-refunded"
+    case purchaseReinstated = "purchase-reinstated"
 
     /// Lets the device replace an earlier copy of the same message, so a repeat does not stack up.
     /// The value is the raw value, and it will not change for an existing case.
@@ -72,6 +75,20 @@ public struct EntitlementMessages: Sendable, Equatable {
         subtitle: "Subscribe to get the full experience.",
         body: "")
 
+    public var purchased = IAPPayload(
+        title: "Purchase complete",
+        subtitle: "Thank you for your purchase.",
+        body: "")
+    public var purchaseRefunded = IAPPayload(
+        title: "Purchase refunded",
+        subtitle: "Your purchase was refunded.",
+        body: "")
+
+    public var purchaseReinstated = IAPPayload(
+        title: "Purchase restored",
+        subtitle: "Your purchase is yours again.",
+        body: "")
+
     public static let `default` = EntitlementMessages()
 
     public init() {}
@@ -90,6 +107,9 @@ public struct EntitlementMessages: Sendable, Equatable {
         case .cancelled: cancelled
         case .cancelledAppIssue: cancelledAppIssue
         case .notSubscribed: notSubscribed
+        case .purchased: purchased
+        case .purchaseRefunded: purchaseRefunded
+        case .purchaseReinstated: purchaseReinstated
         }
     }
 }

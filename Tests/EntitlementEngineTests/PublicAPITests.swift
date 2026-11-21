@@ -39,6 +39,53 @@ struct PublicAPITests {
         #expect(double.pushFailure == nil)
     }
 
+    private struct PurchaseStore: PurchaseStoreDelegate {
+        func purchase(transactionID: String, store: PurchaseRecord.Store) async throws -> PurchaseRecord? { nil }
+        func savePurchase(
+            _ record: PurchaseRecord, replacing previous: PurchaseRecord?, quantityChange: Int
+        ) async throws {}
+    }
+
+    @Test func aCallerCanRecordOneTimePurchases() async throws {
+        let engine = PurchaseEngine(
+            storeDelegate: PurchaseStore(),
+            products: [
+                OneTimeProduct(id: "coins", kind: .consumable),
+                OneTimeProduct(id: "pro", kind: .nonConsumable),
+                OneTimeProduct(id: "season", kind: .nonRenewing(duration: 86_400)),
+            ],
+            messages: .default)
+        let apple = try await engine.processAppStoreTransaction(
+            notifier: Quiet(),
+            transaction: AppStoreTransaction(
+                productId: "coins", transactionId: "1", quantity: 2, purchaseDate: Date(), appAccountToken: "buyer"))
+        #expect(apple.outcome == .granted)
+        #expect(apple.quantityChange == 2)
+        #expect(apple.didSave)
+        #expect(apple.product?.kind == .consumable)
+        #expect(apple.notification == .purchased)
+        #expect(apple.pushFailure == nil)
+        #expect(apple.accessExpiresAt == nil)
+        let record = try #require(apple.record)
+        #expect(record.isActive(at: Date()) && !record.isRevoked && record.remainingQuantity == 2)
+
+        let purchase = GooglePlayProductPurchase(purchaseState: 0, acknowledgementState: 0)
+        let google = try await engine.processGooglePlayPurchase(
+            notifier: Quiet(), productID: "pro", purchaseToken: "token", purchase: purchase, voided: nil, accountID: "account")
+        #expect(google.record?.store == .googlePlay && google.record?.accountID == "account")
+        let reversal = try await engine.processAppStoreRefundReversal(
+            notifier: Quiet(), transaction: AppStoreTransaction(productId: "coins", transactionId: "1"),
+            signedDate: Date(), accountID: "account")
+        _ = GooglePlayProductPurchase.Voided.partial
+        // This store keeps nothing, so the reversal is the first news of the purchase.
+        #expect(reversal.outcome == .granted)
+        #expect(google.outcome == .granted)
+        #expect(purchase.needsAcknowledgement && !purchase.isConsumed && !purchase.isTestPurchase)
+
+        let double = PurchaseResult(outcome: .ignored)
+        #expect(double.record == nil && double.quantityChange == 0 && !double.didSave)
+    }
+
     @Test func aCallerCanTellPushFailuresApart() {
         func describe(_ failure: any Error) -> String {
             switch failure {

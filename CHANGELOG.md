@@ -24,6 +24,10 @@ The first tagged release. Everything below is a change from the untagged version
 
 ### Added
 
+- **One-time purchases.** `PurchaseEngine` records consumables, non-consumables and non-renewing purchases from both stores. It grants each purchase once, takes each refund or void back once, and gives units back when Apple reverses a refund. It comes with `OneTimeProduct`, `PurchaseRecord`, `PurchaseResult`, `PurchaseStoreDelegate` and `GooglePlayProductPurchase`.
+- `AppStoreTransaction` has `transactionId`, `type`, `quantity`, `purchaseDate`, `appAccountToken`, `inAppOwnershipType`, `environment`, `revocationType`, `revocationPercentage` and `signedDate`.
+- `EntitlementNotification` has `purchased`, `purchaseRefunded` and `purchaseReinstated`, with copy in `EntitlementMessages`.
+- `EntitlementError.missingTransactionID` and `missingAccountID`.
 - `retiredProductIDs` on the engine, for products you no longer sell that still have subscribers. An order on a listed product gets access back after a billing retry, an account hold or a pause.
 - `EntitlementMessages.payload(for:)` is public, so a failed push can be resent with the same copy.
 - `EntitlementResult` has a public initializer, for a test double of the engine.
